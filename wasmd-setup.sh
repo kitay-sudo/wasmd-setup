@@ -369,6 +369,47 @@ function send_tokens() {
     pause
 }
 
+function create_validator_from_file() {
+    read -p "Введите имя кошелька (from): " FROM_WALLET
+    KEY=$(wasmd tendermint show-validator | jq -r '.key')
+    if [ -z "$KEY" ]; then
+        echo "Не удалось получить публичный ключ валидатора."
+        pause
+        return
+    fi
+    read -p "Введите сумму делегирования (например, 5000000ufzp): " AMOUNT
+    read -p "Введите монникер (имя валидатора): " MONIKER
+    read -p "Введите минимальную собственную делегацию: " MIN_SELF_DELEGATION
+    read -p "Введите chain-id (по умолчанию fzp-chain): " CHAIN_ID
+    CHAIN_ID=${CHAIN_ID:-fzp-chain}
+    read -p "Введите denom токена (по умолчанию ufzp): " TOKEN_DENOM
+    TOKEN_DENOM=${TOKEN_DENOM:-ufzp}
+
+    VALIDATOR_FILE=~/validator.json
+    cat >"$VALIDATOR_FILE" <<EOL
+{
+    "pubkey": {
+        "@type": "/cosmos.crypto.ed25519.PubKey",
+        "key": "$KEY"
+    },
+    "amount": "$AMOUNT",
+    "moniker": "$MONIKER",
+    "identity": "",
+    "website": "",
+    "security": "",
+    "details": "",
+    "commission-rate": "0.10",
+    "commission-max-rate": "0.20",
+    "commission-max-change-rate": "0.01",
+    "min-self-delegation": "$MIN_SELF_DELEGATION"
+}
+EOL
+
+    echo "Файл $VALIDATOR_FILE создан. Запускаем создание валидатора..."
+    wasmd tx staking create-validator "$VALIDATOR_FILE" --from="$FROM_WALLET" --chain-id="$CHAIN_ID" --gas="auto" --gas-adjustment=1.2 --gas-prices="0.0001$TOKEN_DENOM" -y
+    pause
+}
+
 while true; do
     clear
     echo "===== Мастер-нода wasmd: меню установки ====="
@@ -389,7 +430,8 @@ while true; do
     echo "15. Копировать genesis.json на другую ноду"
     echo "16. Отправить монеты (tx bank send)"
     echo "17. Создать кошелек"
-    echo "18. Выйти"
+    echo "18. Создать валидатора через файл (validator.json)"
+    echo "19. Выйти"
     echo -n "Выберите пункт меню: "
     read choice
     case $choice in
@@ -410,7 +452,8 @@ while true; do
         15) copy_genesis_to_node ;;
         16) send_tokens ;;
         17) add_wallet ;;
-        18) echo "Выход."; exit 0 ;;
+        18) create_validator_from_file ;;
+        19) echo "Выход."; exit 0 ;;
         *) echo "Неверный выбор!"; pause ;;
     esac
 done 
