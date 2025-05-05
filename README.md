@@ -3,7 +3,7 @@
 ## 1. Клонирование репозитория
 
 ```bash
-git clone [<ваш-репозиторий-с-скриптом>](https://github.com/kitay-sudo/wasmd-setup.git)
+git clone https://github.com/kitay-sudo/wasmd-setup.git
 ```
 
 ## 2. Запуск скрипта установки
