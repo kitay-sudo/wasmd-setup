@@ -8,14 +8,27 @@ fi
 
 # Список обязательных переменных
 REQUIRED_VARS=(
+  # Основные параметры сети
   STAKE CHAIN_ID MONIKER EXTERNAL_ADDR TOKEN_DENOM
+  
+  # Параметры валидатора - влияют на комиссии и минимальные делегирования
   MIN_SELF_DELEGATION COMMISSION_RATE COMMISSION_MAX_RATE COMMISSION_MAX_CHANGE_RATE
+  
+  # Порты для различных сервисов блокчейна
   P2P_PORT RPC_PORT API_PORT GRPC_PORT
+  
+  # Параметры управления (governance) и экономики сети
   MIN_DEPOSIT_AMOUNT EXPEDITED_MIN_DEPOSIT_AMOUNT CONSTANT_FEE_AMOUNT MAX_VALIDATORS
   UNBONDING_TIME INFLATION ANNUAL_PROVISIONS INFLATION_RATE_CHANGE INFLATION_MAX INFLATION_MIN
   GOAL_BONDED BLOCKS_PER_YEAR COMMUNITY_TAX BASE_PROPOSER_REWARD BONUS_PROPOSER_REWARD
-  WITHDRAW_ADDR_ENABLED SLASH_FRACTION_DOUBLE_SIGN SLASH_FRACTION_DOWNTIME DOWNTIME_JAIL_DURATION
-  SIGNED_BLOCKS_WINDOW MIN_SIGNED_PER_WINDOW MINIMUM_GAS_PRICE SEND_AMOUNT GENTX_AMOUNT
+  WITHDRAW_ADDR_ENABLED 
+  
+  # Параметры слэшинга (штрафов) и безопасности сети
+  SLASH_FRACTION_DOUBLE_SIGN SLASH_FRACTION_DOWNTIME DOWNTIME_JAIL_DURATION
+  SIGNED_BLOCKS_WINDOW MIN_SIGNED_PER_WINDOW 
+  
+  # Прочие параметры
+  MINIMUM_GAS_PRICES SEND_AMOUNT GENTX_AMOUNT
 )
 
 MISSING_VARS=()
@@ -35,19 +48,26 @@ if [ ${#MISSING_VARS[@]} -ne 0 ]; then
 fi
 
 # Проверка и запрос всех переменных, если не заданы в .env
+# Основные параметры
 if [ -z "$STAKE" ]; then read -p "Введите STAKE (деноминация монеты): " STAKE; fi
 if [ -z "$CHAIN_ID" ]; then read -p "Введите chain-id: " CHAIN_ID; fi
 if [ -z "$MONIKER" ]; then read -p "Введите MONIKER (имя ноды): " MONIKER; fi
 if [ -z "$EXTERNAL_ADDR" ]; then read -p "Введите EXTERNAL_ADDR (внешний IP): " EXTERNAL_ADDR; fi
 if [ -z "$TOKEN_DENOM" ]; then read -p "Введите TOKEN_DENOM: " TOKEN_DENOM; fi
+
+# Параметры валидатора
 if [ -z "$MIN_SELF_DELEGATION" ]; then read -p "Введите MIN_SELF_DELEGATION: " MIN_SELF_DELEGATION; fi
 if [ -z "$COMMISSION_RATE" ]; then read -p "Введите COMMISSION_RATE: " COMMISSION_RATE; fi
 if [ -z "$COMMISSION_MAX_RATE" ]; then read -p "Введите COMMISSION_MAX_RATE: " COMMISSION_MAX_RATE; fi
 if [ -z "$COMMISSION_MAX_CHANGE_RATE" ]; then read -p "Введите COMMISSION_MAX_CHANGE_RATE: " COMMISSION_MAX_CHANGE_RATE; fi
+
+# Порты
 if [ -z "$P2P_PORT" ]; then read -p "Введите P2P_PORT: " P2P_PORT; fi
 if [ -z "$RPC_PORT" ]; then read -p "Введите RPC_PORT: " RPC_PORT; fi
 if [ -z "$API_PORT" ]; then read -p "Введите API_PORT: " API_PORT; fi
 if [ -z "$GRPC_PORT" ]; then read -p "Введите GRPC_PORT: " GRPC_PORT; fi
+
+# Параметры governance и экономики
 if [ -z "$MIN_DEPOSIT_AMOUNT" ]; then read -p "Введите MIN_DEPOSIT_AMOUNT: " MIN_DEPOSIT_AMOUNT; fi
 if [ -z "$EXPEDITED_MIN_DEPOSIT_AMOUNT" ]; then read -p "Введите EXPEDITED_MIN_DEPOSIT_AMOUNT: " EXPEDITED_MIN_DEPOSIT_AMOUNT; fi
 if [ -z "$CONSTANT_FEE_AMOUNT" ]; then read -p "Введите CONSTANT_FEE_AMOUNT: " CONSTANT_FEE_AMOUNT; fi
@@ -64,12 +84,16 @@ if [ -z "$COMMUNITY_TAX" ]; then read -p "Введите COMMUNITY_TAX: " COMMUN
 if [ -z "$BASE_PROPOSER_REWARD" ]; then read -p "Введите BASE_PROPOSER_REWARD: " BASE_PROPOSER_REWARD; fi
 if [ -z "$BONUS_PROPOSER_REWARD" ]; then read -p "Введите BONUS_PROPOSER_REWARD: " BONUS_PROPOSER_REWARD; fi
 if [ -z "$WITHDRAW_ADDR_ENABLED" ]; then read -p "Введите WITHDRAW_ADDR_ENABLED: " WITHDRAW_ADDR_ENABLED; fi
+
+# Параметры слэшинга и безопасности
 if [ -z "$SLASH_FRACTION_DOUBLE_SIGN" ]; then read -p "Введите SLASH_FRACTION_DOUBLE_SIGN: " SLASH_FRACTION_DOUBLE_SIGN; fi
 if [ -z "$SLASH_FRACTION_DOWNTIME" ]; then read -p "Введите SLASH_FRACTION_DOWNTIME: " SLASH_FRACTION_DOWNTIME; fi
 if [ -z "$DOWNTIME_JAIL_DURATION" ]; then read -p "Введите DOWNTIME_JAIL_DURATION: " DOWNTIME_JAIL_DURATION; fi
 if [ -z "$SIGNED_BLOCKS_WINDOW" ]; then read -p "Введите SIGNED_BLOCKS_WINDOW: " SIGNED_BLOCKS_WINDOW; fi
 if [ -z "$MIN_SIGNED_PER_WINDOW" ]; then read -p "Введите MIN_SIGNED_PER_WINDOW: " MIN_SIGNED_PER_WINDOW; fi
-if [ -z "$MINIMUM_GAS_PRICE" ]; then read -p "Введите MINIMUM_GAS_PRICE: " MINIMUM_GAS_PRICE; fi
+
+# Прочие параметры
+if [ -z "$MINIMUM_GAS_PRICES" ]; then read -p "Введите MINIMUM_GAS_PRICES: " MINIMUM_GAS_PRICES; fi
 if [ -z "$SEND_AMOUNT" ]; then read -p "Введите SEND_AMOUNT: " SEND_AMOUNT; fi
 if [ -z "$GENTX_AMOUNT" ]; then read -p "Введите GENTX_AMOUNT: " GENTX_AMOUNT; fi
 
@@ -173,8 +197,11 @@ function configure_wasmd() {
     fi
 
     # Изменяем другие параметры через sed (если нужно)
+    # Основные параметры валидаторов и стейкинга
     sed -i "s/\"max_validators\": [0-9]*/\"max_validators\": $MAX_VALIDATORS/" "$GENESIS"
     sed -i "s/\"unbonding_time\": \".*\"/\"unbonding_time\": \"$UNBONDING_TIME\"/" "$GENESIS"
+    
+    # Параметры инфляции и экономики сети
     sed -i "s/\"inflation\": \".*\"/\"inflation\": \"$INFLATION\"/" "$GENESIS"
     sed -i "s/\"annual_provisions\": \".*\"/\"annual_provisions\": \"$ANNUAL_PROVISIONS\"/" "$GENESIS"
     sed -i "s/\"inflation_rate_change\": \".*\"/\"inflation_rate_change\": \"$INFLATION_RATE_CHANGE\"/" "$GENESIS"
@@ -182,10 +209,14 @@ function configure_wasmd() {
     sed -i "s/\"inflation_min\": \".*\"/\"inflation_min\": \"$INFLATION_MIN\"/" "$GENESIS"
     sed -i "s/\"goal_bonded\": \".*\"/\"goal_bonded\": \"$GOAL_BONDED\"/" "$GENESIS"
     sed -i "s/\"blocks_per_year\": \".*\"/\"blocks_per_year\": \"$BLOCKS_PER_YEAR\"/" "$GENESIS"
+    
+    # Параметры комиссий и наград
     sed -i "s/\"community_tax\": \".*\"/\"community_tax\": \"$COMMUNITY_TAX\"/" "$GENESIS"
     sed -i "s/\"base_proposer_reward\": \".*\"/\"base_proposer_reward\": \"$BASE_PROPOSER_REWARD\"/" "$GENESIS"
     sed -i "s/\"bonus_proposer_reward\": \".*\"/\"bonus_proposer_reward\": \"$BONUS_PROPOSER_REWARD\"/" "$GENESIS"
     sed -i "s/\"withdraw_addr_enabled\": [a-z]*/\"withdraw_addr_enabled\": $WITHDRAW_ADDR_ENABLED/" "$GENESIS"
+    
+    # Параметры слэшинга (штрафов) и безопасности
     sed -i "s/\"slash_fraction_double_sign\": \".*\"/\"slash_fraction_double_sign\": \"$SLASH_FRACTION_DOUBLE_SIGN\"/" "$GENESIS"
     sed -i "s/\"slash_fraction_downtime\": \".*\"/\"slash_fraction_downtime\": \"$SLASH_FRACTION_DOWNTIME\"/" "$GENESIS"
     sed -i "s/\"downtime_jail_duration\": \".*\"/\"downtime_jail_duration\": \"$DOWNTIME_JAIL_DURATION\"/" "$GENESIS"
@@ -218,10 +249,11 @@ function configure_wasmd() {
     sed -i "/\\[wasm\\]/,/^\\[/ s|^max_contract_gas *=.*|max_contract_gas = $WASM_MAX_CONTRACT_GAS|" "$APP_TOML"
     sed -i "/\\[wasm\\]/,/^\\[/ s|^max_contract_msg_size *=.*|max_contract_msg_size = $WASM_MAX_CONTRACT_MSG_SIZE|" "$APP_TOML"
     sed -i "/\\[wasm\\]/,/^\\[/ s|^simulation_gas_limit *=.*|simulation_gas_limit = $WASM_SIMULATION_GAS_LIMIT|" "$APP_TOML"
-    # minimum-gas-prices (глобальный параметр)
-    sed -i "s|^[[:space:]]*minimum-gas-prices *=.*|minimum-gas-prices = \"$MINIMUM_GAS_PRICE$STAKE\"|" "$APP_TOML"
-
-    echo "Конфигурация wasmd успешно обновлена!"
+    
+    # Настройка минимальной цены газа
+    sed -i "s|^[[:space:]]*minimum-gas-prices *=.*|minimum-gas-prices = \"$MINIMUM_GAS_PRICES$STAKE\"|" "$APP_TOML"
+    
+    echo "Конфигурация wasmd успешно настроена!"
     pause
 }
 
