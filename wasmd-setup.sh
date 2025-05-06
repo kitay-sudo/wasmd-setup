@@ -162,7 +162,10 @@ function init_wasmd() {
         return
     fi
     cd wasmd
-    wasmd init "$MONIKER" --chain-id "$CHAIN_ID" && echo "Узел wasmd успешно инициализирован!" || { echo "Ошибка при инициализации узла!"; cd ..; pause; return; }
+    # Очищаем MONIKER и CHAIN_ID от символов новой строки
+    MONIKER_CLEAN=$(echo "$MONIKER" | tr -d '\r\n')
+    CHAIN_ID_CLEAN=$(echo "$CHAIN_ID" | tr -d '\r\n')
+    wasmd init "$MONIKER_CLEAN" --chain-id "$CHAIN_ID_CLEAN" && echo "Узел wasmd успешно инициализирован!" || { echo "Ошибка при инициализации узла!"; cd ..; pause; return; }
     cd ..
     pause
 }
@@ -172,12 +175,37 @@ function configure_wasmd() {
     CONFIG_TOML="/root/.wasmd/config/config.toml"
     APP_TOML="/root/.wasmd/config/app.toml"
 
-    # Обновляем genesis.json через jq
+    # Очищаем все переменные от символов переноса строки
+    echo "Очищаем параметры от символов переноса строки..."
+    STAKE_CLEAN=$(echo "$STAKE" | tr -d '\r\n')
+    CONSTANT_FEE_AMOUNT_CLEAN=$(echo "$CONSTANT_FEE_AMOUNT" | tr -d '\r\n')
+    MIN_DEPOSIT_AMOUNT_CLEAN=$(echo "$MIN_DEPOSIT_AMOUNT" | tr -d '\r\n')
+    EXPEDITED_MIN_DEPOSIT_AMOUNT_CLEAN=$(echo "$EXPEDITED_MIN_DEPOSIT_AMOUNT" | tr -d '\r\n')
+    MAX_VALIDATORS_CLEAN=$(echo "$MAX_VALIDATORS" | tr -d '\r\n')
+    UNBONDING_TIME_CLEAN=$(echo "$UNBONDING_TIME" | tr -d '\r\n')
+    INFLATION_CLEAN=$(echo "$INFLATION" | tr -d '\r\n')
+    ANNUAL_PROVISIONS_CLEAN=$(echo "$ANNUAL_PROVISIONS" | tr -d '\r\n')
+    INFLATION_RATE_CHANGE_CLEAN=$(echo "$INFLATION_RATE_CHANGE" | tr -d '\r\n')
+    INFLATION_MAX_CLEAN=$(echo "$INFLATION_MAX" | tr -d '\r\n')
+    INFLATION_MIN_CLEAN=$(echo "$INFLATION_MIN" | tr -d '\r\n')
+    GOAL_BONDED_CLEAN=$(echo "$GOAL_BONDED" | tr -d '\r\n')
+    BLOCKS_PER_YEAR_CLEAN=$(echo "$BLOCKS_PER_YEAR" | tr -d '\r\n')
+    COMMUNITY_TAX_CLEAN=$(echo "$COMMUNITY_TAX" | tr -d '\r\n')
+    BASE_PROPOSER_REWARD_CLEAN=$(echo "$BASE_PROPOSER_REWARD" | tr -d '\r\n')
+    BONUS_PROPOSER_REWARD_CLEAN=$(echo "$BONUS_PROPOSER_REWARD" | tr -d '\r\n')
+    WITHDRAW_ADDR_ENABLED_CLEAN=$(echo "$WITHDRAW_ADDR_ENABLED" | tr -d '\r\n')
+    SLASH_FRACTION_DOUBLE_SIGN_CLEAN=$(echo "$SLASH_FRACTION_DOUBLE_SIGN" | tr -d '\r\n')
+    SLASH_FRACTION_DOWNTIME_CLEAN=$(echo "$SLASH_FRACTION_DOWNTIME" | tr -d '\r\n')
+    DOWNTIME_JAIL_DURATION_CLEAN=$(echo "$DOWNTIME_JAIL_DURATION" | tr -d '\r\n')
+    SIGNED_BLOCKS_WINDOW_CLEAN=$(echo "$SIGNED_BLOCKS_WINDOW" | tr -d '\r\n')
+    MIN_SIGNED_PER_WINDOW_CLEAN=$(echo "$MIN_SIGNED_PER_WINDOW" | tr -d '\r\n')
+
+    # Обновляем genesis.json через jq с очищенными параметрами
     jq \
-      --arg stake "$STAKE" \
-      --arg constant_fee "$CONSTANT_FEE_AMOUNT" \
-      --arg min_deposit "$MIN_DEPOSIT_AMOUNT" \
-      --arg expedited_min_deposit "$EXPEDITED_MIN_DEPOSIT_AMOUNT" \
+      --arg stake "$STAKE_CLEAN" \
+      --arg constant_fee "$CONSTANT_FEE_AMOUNT_CLEAN" \
+      --arg min_deposit "$MIN_DEPOSIT_AMOUNT_CLEAN" \
+      --arg expedited_min_deposit "$EXPEDITED_MIN_DEPOSIT_AMOUNT_CLEAN" \
       '.app_state.crisis.constant_fee.denom = $stake
        | .app_state.crisis.constant_fee.amount = $constant_fee
        | .app_state.gov.deposit_params.min_deposit[0].denom = $stake
@@ -193,50 +221,60 @@ function configure_wasmd() {
     # Изменяем chain_id, если нужно
     read -p "Введите chain-id (Enter чтобы пропустить): " CHAIN_ID
     if [ ! -z "$CHAIN_ID" ]; then
-        jq --arg chain_id "$CHAIN_ID" '.chain_id = $chain_id' "$GENESIS" > tmp_genesis.json && mv tmp_genesis.json "$GENESIS"
+        CHAIN_ID_CLEAN=$(echo "$CHAIN_ID" | tr -d '\r\n')
+        jq --arg chain_id "$CHAIN_ID_CLEAN" '.chain_id = $chain_id' "$GENESIS" > tmp_genesis.json && mv tmp_genesis.json "$GENESIS"
     fi
 
-    # Изменяем другие параметры через sed (если нужно)
+    # Изменяем другие параметры через sed (если нужно) с очищенными значениями
     # Основные параметры валидаторов и стейкинга
-    sed -i "s/\"max_validators\": [0-9]*/\"max_validators\": $MAX_VALIDATORS/" "$GENESIS"
-    sed -i "s/\"unbonding_time\": \".*\"/\"unbonding_time\": \"$UNBONDING_TIME\"/" "$GENESIS"
+    sed -i "s/\"max_validators\": [0-9]*/\"max_validators\": $MAX_VALIDATORS_CLEAN/" "$GENESIS"
+    sed -i "s/\"unbonding_time\": \".*\"/\"unbonding_time\": \"$UNBONDING_TIME_CLEAN\"/" "$GENESIS"
     
     # Параметры инфляции и экономики сети
-    sed -i "s/\"inflation\": \".*\"/\"inflation\": \"$INFLATION\"/" "$GENESIS"
-    sed -i "s/\"annual_provisions\": \".*\"/\"annual_provisions\": \"$ANNUAL_PROVISIONS\"/" "$GENESIS"
-    sed -i "s/\"inflation_rate_change\": \".*\"/\"inflation_rate_change\": \"$INFLATION_RATE_CHANGE\"/" "$GENESIS"
-    sed -i "s/\"inflation_max\": \".*\"/\"inflation_max\": \"$INFLATION_MAX\"/" "$GENESIS"
-    sed -i "s/\"inflation_min\": \".*\"/\"inflation_min\": \"$INFLATION_MIN\"/" "$GENESIS"
-    sed -i "s/\"goal_bonded\": \".*\"/\"goal_bonded\": \"$GOAL_BONDED\"/" "$GENESIS"
-    sed -i "s/\"blocks_per_year\": \".*\"/\"blocks_per_year\": \"$BLOCKS_PER_YEAR\"/" "$GENESIS"
+    sed -i "s/\"inflation\": \".*\"/\"inflation\": \"$INFLATION_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"annual_provisions\": \".*\"/\"annual_provisions\": \"$ANNUAL_PROVISIONS_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"inflation_rate_change\": \".*\"/\"inflation_rate_change\": \"$INFLATION_RATE_CHANGE_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"inflation_max\": \".*\"/\"inflation_max\": \"$INFLATION_MAX_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"inflation_min\": \".*\"/\"inflation_min\": \"$INFLATION_MIN_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"goal_bonded\": \".*\"/\"goal_bonded\": \"$GOAL_BONDED_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"blocks_per_year\": \".*\"/\"blocks_per_year\": \"$BLOCKS_PER_YEAR_CLEAN\"/" "$GENESIS"
     
     # Параметры комиссий и наград
-    sed -i "s/\"community_tax\": \".*\"/\"community_tax\": \"$COMMUNITY_TAX\"/" "$GENESIS"
-    sed -i "s/\"base_proposer_reward\": \".*\"/\"base_proposer_reward\": \"$BASE_PROPOSER_REWARD\"/" "$GENESIS"
-    sed -i "s/\"bonus_proposer_reward\": \".*\"/\"bonus_proposer_reward\": \"$BONUS_PROPOSER_REWARD\"/" "$GENESIS"
-    sed -i "s/\"withdraw_addr_enabled\": [a-z]*/\"withdraw_addr_enabled\": $WITHDRAW_ADDR_ENABLED/" "$GENESIS"
+    sed -i "s/\"community_tax\": \".*\"/\"community_tax\": \"$COMMUNITY_TAX_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"base_proposer_reward\": \".*\"/\"base_proposer_reward\": \"$BASE_PROPOSER_REWARD_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"bonus_proposer_reward\": \".*\"/\"bonus_proposer_reward\": \"$BONUS_PROPOSER_REWARD_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"withdraw_addr_enabled\": [a-z]*/\"withdraw_addr_enabled\": $WITHDRAW_ADDR_ENABLED_CLEAN/" "$GENESIS"
     
     # Параметры слэшинга (штрафов) и безопасности
-    sed -i "s/\"slash_fraction_double_sign\": \".*\"/\"slash_fraction_double_sign\": \"$SLASH_FRACTION_DOUBLE_SIGN\"/" "$GENESIS"
-    sed -i "s/\"slash_fraction_downtime\": \".*\"/\"slash_fraction_downtime\": \"$SLASH_FRACTION_DOWNTIME\"/" "$GENESIS"
-    sed -i "s/\"downtime_jail_duration\": \".*\"/\"downtime_jail_duration\": \"$DOWNTIME_JAIL_DURATION\"/" "$GENESIS"
-    sed -i "s/\"signed_blocks_window\": \".*\"/\"signed_blocks_window\": \"$SIGNED_BLOCKS_WINDOW\"/" "$GENESIS"
-    sed -i "s/\"min_signed_per_window\": \".*\"/\"min_signed_per_window\": \"$MIN_SIGNED_PER_WINDOW\"/" "$GENESIS"
+    sed -i "s/\"slash_fraction_double_sign\": \".*\"/\"slash_fraction_double_sign\": \"$SLASH_FRACTION_DOUBLE_SIGN_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"slash_fraction_downtime\": \".*\"/\"slash_fraction_downtime\": \"$SLASH_FRACTION_DOWNTIME_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"downtime_jail_duration\": \".*\"/\"downtime_jail_duration\": \"$DOWNTIME_JAIL_DURATION_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"signed_blocks_window\": \".*\"/\"signed_blocks_window\": \"$SIGNED_BLOCKS_WINDOW_CLEAN\"/" "$GENESIS"
+    sed -i "s/\"min_signed_per_window\": \".*\"/\"min_signed_per_window\": \"$MIN_SIGNED_PER_WINDOW_CLEAN\"/" "$GENESIS"
 
     # Настройка config.toml
-    sed -i "s|^rpc_laddr *=.*|rpc_laddr = \"$RPC_LADDR\"|" "$CONFIG_TOML"
-    sed -i "s|^external_address *=.*|external_address = \"$EXTERNAL_ADDR:$P2P_PORT\"|" "$CONFIG_TOML"
+    # Очищаем переменные от символов новой строки
+    RPC_LADDR_CLEAN=$(echo "$RPC_LADDR" | tr -d '\r\n')
+    EXTERNAL_ADDR_CLEAN=$(echo "$EXTERNAL_ADDR" | tr -d '\r\n')
+    P2P_PORT_CLEAN=$(echo "$P2P_PORT" | tr -d '\r\n')
+    
+    sed -i "s|^rpc_laddr *=.*|rpc_laddr = \"$RPC_LADDR_CLEAN\"|" "$CONFIG_TOML"
+    sed -i "s|^external_address *=.*|external_address = \"$EXTERNAL_ADDR_CLEAN:$P2P_PORT_CLEAN\"|" "$CONFIG_TOML"
 
     # Настройка app.toml
+    # Очищаем переменные от символов новой строки для API и GRPC
+    API_ADDRESS_CLEAN=$(echo "$API_ADDRESS" | tr -d '\r\n')
+    GRPC_ADDRESS_CLEAN=$(echo "$GRPC_ADDRESS" | tr -d '\r\n')
+    
     # [api]
-    sed -i "/\\[api\\]/,/^\\[/ s|^address *=.*|address = \"$API_ADDRESS\"|" "$APP_TOML"
+    sed -i "/\\[api\\]/,/^\\[/ s|^address *=.*|address = \"$API_ADDRESS_CLEAN\"|" "$APP_TOML"
     sed -i "/\\[api\\]/,/^\\[/ s|^enable *=.*|enable = $API_ENABLE|" "$APP_TOML"
     sed -i "/\\[api\\]/,/^\\[/ s|^swagger *=.*|swagger = $API_SWAGGER|" "$APP_TOML"
     sed -i "/\\[api\\]/,/^\\[/ s|^max_open_connections *=.*|max_open_connections = $API_MAX_OPEN_CONNECTIONS|" "$APP_TOML"
     sed -i "/\\[api\\]/,/^\\[/ s|^rpc_write_timeout *=.*|rpc_write_timeout = $API_RPC_WRITE_TIMEOUT|" "$APP_TOML"
     sed -i "/\\[api\\]/,/^\\[/ s|^enabled_unsafe_cors *=.*|enabled_unsafe_cors = $API_ENABLED_UNSAFE_CORS|" "$APP_TOML"
     # [grpc]
-    sed -i "/\\[grpc\\]/,/^\\[/ s|^address *=.*|address = \"$GRPC_ADDRESS\"|" "$APP_TOML"
+    sed -i "/\\[grpc\\]/,/^\\[/ s|^address *=.*|address = \"$GRPC_ADDRESS_CLEAN\"|" "$APP_TOML"
     sed -i "/\\[grpc\\]/,/^\\[/ s|^enable *=.*|enable = $GRPC_ENABLE|" "$APP_TOML"
     # [state_sync]
     sed -i "/\\[state_sync\\]/,/^\\[/ s|^snapshot_interval *=.*|snapshot_interval = $STATE_SYNC_SNAPSHOT_INTERVAL|" "$APP_TOML"
@@ -251,9 +289,35 @@ function configure_wasmd() {
     sed -i "/\\[wasm\\]/,/^\\[/ s|^simulation_gas_limit *=.*|simulation_gas_limit = $WASM_SIMULATION_GAS_LIMIT|" "$APP_TOML"
     
     # Настройка минимальной цены газа
-    sed -i "s|^[[:space:]]*minimum-gas-prices *=.*|minimum-gas-prices = \"$MINIMUM_GAS_PRICES$STAKE\"|" "$APP_TOML"
+    MINIMUM_GAS_PRICES_CLEAN=$(echo "$MINIMUM_GAS_PRICES" | tr -d '\r\n')
+    STAKE_CLEAN=$(echo "$STAKE" | tr -d '\r\n')
+    sed -i "s|^[[:space:]]*minimum-gas-prices *=.*|minimum-gas-prices = \"$MINIMUM_GAS_PRICES_CLEAN$STAKE_CLEAN\"|" "$APP_TOML"
     
     echo "Конфигурация wasmd успешно настроена!"
+    
+    # Автоматически исправляем файлы конфигурации от символов переноса строки
+    echo "Дополнительно исправляем файлы от символов переноса строки..."
+    
+    # Исправляем config.toml
+    echo "Обрабатываем $CONFIG_TOML..."
+    TMP_FILE=$(mktemp)
+    tr -d '\r' < "$CONFIG_TOML" > "$TMP_FILE"
+    mv "$TMP_FILE" "$CONFIG_TOML"
+    
+    # Исправляем genesis.json
+    echo "Обрабатываем $GENESIS..."
+    TMP_FILE=$(mktemp)
+    tr -d '\r' < "$GENESIS" > "$TMP_FILE"
+    mv "$TMP_FILE" "$GENESIS"
+    
+    # Исправляем app.toml
+    echo "Обрабатываем $APP_TOML..."
+    TMP_FILE=$(mktemp)
+    tr -d '\r' < "$APP_TOML" > "$TMP_FILE"
+    mv "$TMP_FILE" "$APP_TOML"
+    
+    echo "Все файлы конфигурации успешно обработаны!"
+    
     pause
 }
 
@@ -292,7 +356,23 @@ function add_genesis_account() {
     cd wasmd
     read -p "Введите имя кошелька для добавления в генезис: " WALLET_NAME
     read -p "Введите количество монет для добавления: " AMOUNT
-    wasmd genesis add-genesis-account "$(wasmd keys show "$WALLET_NAME" -a)" "${AMOUNT}ufzp" && echo "Генезис-аккаунт для '$WALLET_NAME' успешно добавлен с ${AMOUNT}ufzp!" || { echo "Ошибка при добавлении генезис-аккаунта!"; cd ..; pause; return; }
+    
+    # Очищаем введенные данные от символов новой строки
+    WALLET_NAME_CLEAN=$(echo "$WALLET_NAME" | tr -d '\r\n')
+    AMOUNT_CLEAN=$(echo "$AMOUNT" | tr -d '\r\n')
+    
+    # Очищаем переменную STAKE от символов переноса строки
+    STAKE_CLEAN=$(echo "$STAKE" | tr -d '\r\n')
+    
+    # Получаем очищенный адрес
+    WALLET_ADDR=$(wasmd keys show "$WALLET_NAME_CLEAN" -a | tr -d '\r\n')
+    
+    # Формируем сумму с очищенной деноминацией
+    AMOUNT_WITH_DENOM="${AMOUNT_CLEAN}${STAKE_CLEAN}"
+    
+    echo "Выполняем: wasmd genesis add-genesis-account $WALLET_ADDR ${AMOUNT_WITH_DENOM}"
+    
+    wasmd genesis add-genesis-account "$WALLET_ADDR" "${AMOUNT_WITH_DENOM}" && echo "Генезис-аккаунт для '$WALLET_NAME_CLEAN' успешно добавлен с ${AMOUNT_WITH_DENOM}!" || { echo "Ошибка при добавлении генезис-аккаунта!"; cd ..; pause; return; }
     cd ..
     pause
 }
@@ -307,7 +387,21 @@ function create_and_collect_gentx() {
     read -p "Введите имя ключа валидатора для gentx: " VALIDATOR_WALLET_NAME
     read -p "Введите количество для gentx: " AMOUNT
     read -p "Введите chain-id: " CHAIN_ID
-    wasmd genesis gentx "$VALIDATOR_WALLET_NAME" "${AMOUNT}ufzp" --chain-id "$CHAIN_ID" && echo "gentx успешно создан!" || { echo "Ошибка при создании gentx!"; cd ..; pause; return; }
+    
+    # Очищаем введенные данные от символов новой строки
+    VALIDATOR_WALLET_NAME_CLEAN=$(echo "$VALIDATOR_WALLET_NAME" | tr -d '\r\n')
+    AMOUNT_CLEAN=$(echo "$AMOUNT" | tr -d '\r\n')
+    CHAIN_ID_CLEAN=$(echo "$CHAIN_ID" | tr -d '\r\n')
+    
+    # Очищаем переменную STAKE от символов переноса строки
+    STAKE_CLEAN=$(echo "$STAKE" | tr -d '\r\n')
+    
+    # Формируем суммы с очищенной деноминацией
+    GENTX_AMOUNT_WITH_DENOM="${AMOUNT_CLEAN}${STAKE_CLEAN}"
+    
+    echo "Выполняем: wasmd genesis gentx $VALIDATOR_WALLET_NAME_CLEAN ${GENTX_AMOUNT_WITH_DENOM} --chain-id $CHAIN_ID_CLEAN"
+    
+    wasmd genesis gentx "$VALIDATOR_WALLET_NAME_CLEAN" "${GENTX_AMOUNT_WITH_DENOM}" --chain-id "$CHAIN_ID_CLEAN" && echo "gentx успешно создан!" || { echo "Ошибка при создании gentx!"; cd ..; pause; return; }
     wasmd genesis collect-gentxs && echo "gentxs успешно собраны!" || { echo "Ошибка при сборе gentxs!"; cd ..; pause; return; }
     echo
     echo "ID вашей ноды:" 
@@ -457,7 +551,7 @@ function send_tokens() {
         pause
         return
     fi
-    read -p "Введите сумму для отправки (например, 100000000ufzp): " AMOUNT
+    read -p "Введите сумму для отправки (без деноминации, например, 100000000): " AMOUNT
     if [ -z "$AMOUNT" ]; then
         echo "Сумма не может быть пустой!"
         pause
@@ -465,7 +559,23 @@ function send_tokens() {
     fi
     read -p "Введите chain-id (по умолчанию fzp-chain): " CHAIN_ID
     CHAIN_ID=${CHAIN_ID:-fzp-chain}
-    wasmd tx bank send "$MASTER_ADDR" "$VALIDATOR2_ADDR" "$AMOUNT" --chain-id "$CHAIN_ID" --keyring-backend test --node tcp://localhost:26657
+    
+    # Очищаем введенные данные от символов новой строки
+    MASTER_ADDR_CLEAN=$(echo "$MASTER_ADDR" | tr -d '\r\n')
+    VALIDATOR2_ADDR_CLEAN=$(echo "$VALIDATOR2_ADDR" | tr -d '\r\n')
+    AMOUNT_CLEAN=$(echo "$AMOUNT" | tr -d '\r\n')
+    CHAIN_ID_CLEAN=$(echo "$CHAIN_ID" | tr -d '\r\n')
+    
+    # Очищаем переменную STAKE от символов переноса строки
+    STAKE_CLEAN=$(echo "$STAKE" | tr -d '\r\n')
+    
+    # Формируем сумму с очищенной деноминацией
+    AMOUNT_WITH_DENOM="${AMOUNT_CLEAN}${STAKE_CLEAN}"
+    
+    echo "Выполняем: wasmd tx bank send $MASTER_ADDR_CLEAN $VALIDATOR2_ADDR_CLEAN $AMOUNT_WITH_DENOM --chain-id $CHAIN_ID_CLEAN"
+    
+    wasmd tx bank send "$MASTER_ADDR_CLEAN" "$VALIDATOR2_ADDR_CLEAN" "$AMOUNT_WITH_DENOM" --chain-id "$CHAIN_ID_CLEAN" --yes
+    
     pause
 }
 
@@ -481,6 +591,59 @@ function create_validator_from_file() {
     pause
 }
 
+function fix_config_files() {
+    CONFIG_TOML="/root/.wasmd/config/config.toml"
+    GENESIS_JSON="/root/.wasmd/config/genesis.json"
+    APP_TOML="/root/.wasmd/config/app.toml"
+    
+    echo "Исправляем файлы конфигурации от символов переноса строки..."
+    
+    # Исправляем config.toml
+    if [ -f "$CONFIG_TOML" ]; then
+        echo "Обрабатываем $CONFIG_TOML..."
+        # Создаем временный файл
+        TMP_FILE=$(mktemp)
+        # Удаляем символы возврата каретки и сохраняем в временный файл
+        tr -d '\r' < "$CONFIG_TOML" > "$TMP_FILE"
+        # Заменяем оригинальный файл исправленным
+        mv "$TMP_FILE" "$CONFIG_TOML"
+        echo "✅ Файл $CONFIG_TOML успешно исправлен"
+    else
+        echo "⚠️ Файл $CONFIG_TOML не найден"
+    fi
+    
+    # Исправляем genesis.json
+    if [ -f "$GENESIS_JSON" ]; then
+        echo "Обрабатываем $GENESIS_JSON..."
+        # Создаем временный файл
+        TMP_FILE=$(mktemp)
+        # Удаляем символы возврата каретки и сохраняем в временный файл
+        tr -d '\r' < "$GENESIS_JSON" > "$TMP_FILE"
+        # Заменяем оригинальный файл исправленным
+        mv "$TMP_FILE" "$GENESIS_JSON"
+        echo "✅ Файл $GENESIS_JSON успешно исправлен"
+    else
+        echo "⚠️ Файл $GENESIS_JSON не найден"
+    fi
+    
+    # Исправляем app.toml
+    if [ -f "$APP_TOML" ]; then
+        echo "Обрабатываем $APP_TOML..."
+        # Создаем временный файл
+        TMP_FILE=$(mktemp)
+        # Удаляем символы возврата каретки и сохраняем в временный файл
+        tr -d '\r' < "$APP_TOML" > "$TMP_FILE"
+        # Заменяем оригинальный файл исправленным
+        mv "$TMP_FILE" "$APP_TOML"
+        echo "✅ Файл $APP_TOML успешно исправлен"
+    else
+        echo "⚠️ Файл $APP_TOML не найден"
+    fi
+    
+    echo "Все файлы конфигурации успешно обработаны!"
+    pause
+}
+
 function helper_menu() {
     while true; do
         clear
@@ -491,7 +654,8 @@ function helper_menu() {
         echo "4. Отправить монеты (tx bank send)"
         echo "5. Создать валидатора через файл (validator.json)"
         echo "6. Создать кошелек"
-        echo "7. Вернуться в главное меню"
+        echo "7. Исправить файлы конфигурации от символов переноса строки"
+        echo "8. Вернуться в главное меню"
         echo -n "Выберите пункт меню: "
         read helper_choice
         case $helper_choice in
@@ -501,7 +665,8 @@ function helper_menu() {
             4) send_tokens ;;
             5) create_validator_from_file ;;
             6) add_wallet ;;
-            7) break ;;
+            7) fix_config_files ;;
+            8) break ;;
             *) echo "Неверный выбор!"; pause ;;
         esac
     done
