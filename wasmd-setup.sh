@@ -644,6 +644,81 @@ function fix_config_files() {
     pause
 }
 
+function setup_nftables() {
+    # Запрос адресов нод
+    read -p "Введите IP-адрес первой ноды: " NODE1_IP
+    read -p "Введите IP-адрес второй ноды: " NODE2_IP
+    read -p "Введите IP-адрес третьей ноды: " NODE3_IP
+
+    # Запрос административного IP для SSH
+    read -p "Введите административный IP для доступа по SSH: " ADMIN_IP
+
+    # Установка необходимых пакетов
+    echo "Установка необходимых пакетов..."
+    sudo apt update
+    sudo apt install -y nftables
+
+    # Настройка nftables
+    echo "Настройка nftables..."
+
+    NFTABLES_CONF="/etc/nftables.conf"
+
+    sudo bash -c "cat > $NFTABLES_CONF" <<EOL
+#!/usr/sbin/nft -f
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Accept established and related connections
+        ct state established,related accept
+
+        # Allow loopback traffic
+        iif lo accept
+
+        # Allow SSH from the admin IP
+        ip saddr $ADMIN_IP tcp dport 22 accept
+
+        # Allow traffic between the nodes
+        ip saddr { $NODE1_IP, $NODE2_IP, $NODE3_IP } accept
+        ip daddr { $NODE1_IP, $NODE2_IP, $NODE3_IP } accept
+
+        # Log and drop everything else
+        log prefix "Dropped: " counter
+        drop
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+EOL
+
+    # Активируем и перезапускаем nftables
+    echo "Активация и перезапуск nftables..."
+    sudo systemctl enable nftables
+    sudo systemctl restart nftables
+
+    echo "Настройка завершена. Правила nftables применены."
+    echo "Разрешен SSH-доступ с IP: $ADMIN_IP"
+    echo "Разрешен трафик между нодами: $NODE1_IP, $NODE2_IP, $NODE3_IP"
+
+    # Функции логирования
+    log_info() {
+        echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
+    }
+    log_error() {
+        echo -e "\e[31m[ERROR] $(date '+%Y-%m-%d %H:%M:%S') $1\e[0m" >&2
+    }
+
+    log_info "nftables успешно настроен."
+    pause
+}
+
 function helper_menu() {
     while true; do
         clear
@@ -655,7 +730,8 @@ function helper_menu() {
         echo "5. Создать валидатора через файл (validator.json)"
         echo "6. Создать кошелек"
         echo "7. Исправить файлы конфигурации от символов переноса строки"
-        echo "8. Вернуться в главное меню"
+        echo "8. Настроить файрвол (nftables) для защиты нод"
+        echo "9. Вернуться в главное меню"
         echo -n "Выберите пункт меню: "
         read helper_choice
         case $helper_choice in
@@ -666,7 +742,8 @@ function helper_menu() {
             5) create_validator_from_file ;;
             6) add_wallet ;;
             7) fix_config_files ;;
-            8) break ;;
+            8) setup_nftables ;;
+            9) break ;;
             *) echo "Неверный выбор!"; pause ;;
         esac
     done
