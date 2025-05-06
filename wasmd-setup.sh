@@ -852,33 +852,80 @@ EOL
 }
 
 function helper_menu() {
+    # Одинаковое меню для обоих типов нод
     while true; do
         clear
         echo "Утилиты/дополнительные действия"
-        echo "1. Создать systemd-сервис и добавить в автозагрузку"
-        echo "2. Запустить ноду wasmd (foreground)"
-        echo "3. Создать persistent_peers строку и сохранить в файл"
-        echo "4. Отправить монеты (tx bank send)"
-        echo "5. Создать валидатора через файл (validator.json)"
-        echo "6. Создать кошелек"
-        echo "7. Исправить файлы конфигурации от символов переноса строки"
-        echo "8. Настроить файрвол (nftables) для защиты нод"
-        echo "9. Вернуться в главное меню"
+        echo "1. Запустить ноду wasmd (foreground)"
+        echo "2. Отправить монеты (tx bank send)"
+        echo "3. Просмотреть логи"
+        echo "4. Резервное копирование файлов"
+        echo "5. Проверить статус сервиса"
+        echo "6. Тестовый запуск"
+        echo "7. Вернуться в главное меню"
         echo -n "Выберите пункт меню: "
         read helper_choice
         case $helper_choice in
-            1) create_systemd_service ;;
-            2) start_wasmd_node ;;
-            3) generate_persistent_peers ;;
-            4) send_tokens ;;
-            5) create_validator_from_file ;;
-            6) add_wallet ;;
-            7) fix_config_files ;;
-            8) setup_nftables ;;
-            9) break ;;
+            1) start_wasmd_node ;;
+            2) send_tokens ;;
+            3) view_logs ;;
+            4) backup_files ;;
+            5) check_service_status ;;
+            6) test_run ;;
+            7) break ;;
             *) echo "Неверный выбор!"; pause ;;
         esac
     done
+}
+
+# Добавляем недостающие функции для вспомогательного меню
+function view_logs() {
+    echo "Просмотр журнала сервиса wasmd..."
+    sudo journalctl -u wasmd -n 100 --no-pager
+    echo
+    echo "Для непрерывного просмотра журнала используйте команду:"
+    echo "sudo journalctl -u wasmd -f"
+    pause
+}
+
+function backup_files() {
+    BACKUP_DIR="wasmd_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+    
+    echo "Создание резервной копии конфигурационных файлов..."
+    cp -r ~/.wasmd/config "$BACKUP_DIR/" 2>/dev/null || echo "Конфигурация не найдена"
+    cp -r ~/.wasmd/data/priv_validator_state.json "$BACKUP_DIR/" 2>/dev/null || echo "Файл состояния валидатора не найден"
+    
+    echo "Сохранение информации о ключах (без приватных данных)..."
+    wasmd keys list > "$BACKUP_DIR/keys_list.txt" 2>/dev/null || echo "Ошибка при получении списка ключей"
+    
+    echo "Сохранение версий и статусов..."
+    wasmd version > "$BACKUP_DIR/version.txt" 2>/dev/null
+    wasmd status > "$BACKUP_DIR/status.txt" 2>/dev/null || echo "Ошибка при получении статуса ноды"
+    
+    echo "Создание архива..."
+    tar -czf "${BACKUP_DIR}.tar.gz" "$BACKUP_DIR" && rm -rf "$BACKUP_DIR"
+    
+    echo "Резервная копия создана: ${BACKUP_DIR}.tar.gz"
+    echo "Сохраните этот файл в надежном месте!"
+    pause
+}
+
+function check_service_status() {
+    echo "Проверка статуса сервиса wasmd..."
+    sudo systemctl status wasmd --no-pager
+    echo
+    echo "Проверка последних логов:"
+    sudo journalctl -u wasmd -n 10 --no-pager
+    pause
+}
+
+function test_run() {
+    echo "Запуск wasmd в тестовом режиме (нажмите Ctrl+C для выхода)..."
+    cd "$(dirname "$(which wasmd)")" 2>/dev/null || cd ~
+    wasmd start
+    cd - > /dev/null
+    pause
 }
 
 if [ "$NODE_TYPE" = "1" ]; then
@@ -897,8 +944,10 @@ if [ "$NODE_TYPE" = "1" ]; then
         echo "9. Создать и собрать gentx"
         echo "10. Показать ID ноды"
         echo "11. Копировать genesis.json на другую ноду"
-        echo "12. Утилиты/дополнительные действия"
-        echo "13. Выйти"
+        echo "12. Создать systemd-сервис и добавить в автозагрузку"
+        echo "13. Настроить файрвол (nftables) для защиты нод"
+        echo "14. Утилиты/дополнительные действия"
+        echo "15. Выйти"
         echo -n "Выберите пункт меню: "
         read choice
         case $choice in
@@ -913,8 +962,10 @@ if [ "$NODE_TYPE" = "1" ]; then
             9) create_and_collect_gentx ;;
             10) show_node_id ;;
             11) copy_genesis_to_node ;;
-            12) helper_menu ;;
-            13) echo "Выход."; exit 0 ;;
+            12) create_systemd_service ;;
+            13) setup_nftables ;;
+            14) helper_menu ;;
+            15) echo "Выход."; exit 0 ;;
             *) echo "Неверный выбор!"; pause ;;
         esac
     done
@@ -929,17 +980,13 @@ elif [ "$NODE_TYPE" = "2" ]; then
         echo "4. Собрать и установить wasmd"
         echo "5. Инициализировать узел wasmd"
         echo "6. Настроить конфигурацию wasmd"
-        echo "7. Создать persistent_peers строку и сохранить в файл"
-        echo "8. Копировать genesis.json с мастер-ноды"
-        echo "9. Создать кошелек"
-        echo "10. Отправить монеты (tx bank send)"
-        echo "11. Создать валидатора через файл (validator.json)"
-        echo "12. Показать ID ноды"
-        echo "13. Создать systemd-сервис и добавить в автозагрузку"
-        echo "14. Запустить wasmd через systemd (в фоне)"
-        echo "15. Запустить ноду wasmd (foreground)"
-        echo "16. Утилиты/дополнительные действия"
-        echo "17. Выйти"
+        echo "7. Создать кошелек"
+        echo "8. Создать валидатора через файл (validator.json)"
+        echo "9. Показать ID ноды"
+        echo "10. Создать systemd-сервис и добавить в автозагрузку"
+        echo "11. Настроить файрвол (nftables) для защиты нод"
+        echo "12. Утилиты/дополнительные действия"
+        echo "13. Выйти"
         echo -n "Выберите пункт меню: "
         read choice
         case $choice in
@@ -949,17 +996,13 @@ elif [ "$NODE_TYPE" = "2" ]; then
             4) build_wasmd ;;
             5) init_wasmd ;;
             6) configure_wasmd ;;
-            7) generate_persistent_peers ;;
-            8) copy_genesis_to_node ;;
-            9) add_wallet ;;
-            10) send_tokens ;;
-            11) create_validator_from_file ;;
-            12) show_node_id ;;
-            13) create_systemd_service ;;
-            14) start_systemd_service ;;
-            15) start_wasmd_node ;;
-            16) helper_menu ;;
-            17) echo "Выход."; exit 0 ;;
+            7) add_wallet ;;
+            8) create_validator_from_file ;;
+            9) show_node_id ;;
+            10) create_systemd_service ;;
+            11) setup_nftables ;;
+            12) helper_menu ;;
+            13) echo "Выход."; exit 0 ;;
             *) echo "Неверный выбор!"; pause ;;
         esac
     done
