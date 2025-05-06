@@ -184,13 +184,66 @@ function init_wasmd() {
     
     # Дополнительная очистка файлов конфигурации от символов переноса строки и других проблемных символов
     echo "Очистка конфигурационных файлов от проблемных символов..."
+    
+    # Обрабатываем все json и toml файлы
     find ~/.wasmd/config -type f -name "*.json" -o -name "*.toml" | while read file; do
         echo "Обрабатываем $file"
         TMP_FILE=$(mktemp)
-        tr -cd '\11\12\15\40-\176' < "$file" > "$TMP_FILE" # Оставляем только ASCII символы
+        # Оставляем только допустимые ASCII символы
+        tr -cd '\11\12\15\40-\176' < "$file" > "$TMP_FILE"
         mv "$TMP_FILE" "$file"
     done
     
+    # Особая обработка genesis.json для исправления возможных проблем с bech32 адресами
+    GENESIS_FILE=~/.wasmd/config/genesis.json
+    if [ -f "$GENESIS_FILE" ]; then
+        echo "Проверка и исправление bech32 адресов в genesis.json..."
+        TMP_FILE=$(mktemp)
+        
+        # Специальная очистка адресов типа bech32
+        # Сначала сохраняем только допустимые символы для JSON (без кириллицы и других специальных символов)
+        LC_ALL=C tr -dc '\11\12\15\40-\176' < "$GENESIS_FILE" > "$TMP_FILE"
+        
+        # Проверяем, что файл не поврежден и является допустимым JSON после очистки
+        if jq '.' "$TMP_FILE" >/dev/null 2>&1; then
+            mv "$TMP_FILE" "$GENESIS_FILE"
+            echo "Genesis файл успешно очищен."
+        else
+            echo "⚠️ Внимание: Ошибка при проверке genesis.json после очистки. Используем оригинальный файл."
+            rm "$TMP_FILE"
+        fi
+        
+        # Проверяем наличие недопустимых символов в адресах
+        echo "Финальная проверка на допустимость символов в адресах..."
+        if grep -P '[^\x00-\x7F]' "$GENESIS_FILE"; then
+            echo "⚠️ Обнаружены недопустимые символы в $GENESIS_FILE!"
+            echo "Попытка дополнительной очистки..."
+            TMP_FILE=$(mktemp)
+            # Еще одна итерация очистки только ASCII
+            LC_ALL=C tr -cd '\11\12\15\40-\176' < "$GENESIS_FILE" > "$TMP_FILE"
+            mv "$TMP_FILE" "$GENESIS_FILE"
+        else
+            echo "✅ Не обнаружено недопустимых символов в genesis.json"
+        fi
+    fi
+    
+    # Проверяем все критические файлы на наличие недопустимых символов
+    for config_file in ~/.wasmd/config/app.toml ~/.wasmd/config/config.toml ~/.wasmd/config/client.toml; do
+        if [ -f "$config_file" ]; then
+            echo "Проверка $config_file на наличие недопустимых символов..."
+            if grep -P '[^\x00-\x7F]' "$config_file"; then
+                echo "⚠️ Обнаружены недопустимые символы в $config_file!"
+                echo "Выполняем дополнительную очистку..."
+                TMP_FILE=$(mktemp)
+                LC_ALL=C tr -cd '\11\12\15\40-\176' < "$config_file" > "$TMP_FILE"
+                mv "$TMP_FILE" "$config_file"
+            else
+                echo "✅ Не обнаружено недопустимых символов в $config_file"
+            fi
+        fi
+    done
+    
+    echo "Очистка завершена. Все конфигурационные файлы проверены и очищены."
     cd ..
     pause
 }
@@ -489,12 +542,30 @@ function set_bech32_prefix() {
         read -p 'Нажмите Enter, чтобы вернуться в меню...'
         return
     fi
-    read -p "Введите желаемый Bech32-префикс (например, myprefix): " new_prefix
-    if [ -z "$new_prefix" ]; then
+    read -p "Введите желаемый Bech32-префикс (например, myprefix): " new_prefix_raw
+    if [ -z "$new_prefix_raw" ]; then
         echo "Префикс не может быть пустым!"
         read -p 'Нажмите Enter, чтобы вернуться в меню...'
         return
     fi
+    
+    # Используем функцию sanitize_input для очистки префикса от нежелательных символов
+    new_prefix=$(sanitize_input "$new_prefix_raw")
+    
+    # Ещё раз проверяем, что после очистки префикс не пустой
+    if [ -z "$new_prefix" ]; then
+        echo "Префикс после очистки от недопустимых символов стал пустым!"
+        read -p 'Нажмите Enter, чтобы вернуться в меню...'
+        return
+    fi
+    
+    # Проверяем, что префикс содержит только допустимые символы (a-z, 0-9)
+    if ! [[ "$new_prefix" =~ ^[a-z0-9]+$ ]]; then
+        echo "❌ Ошибка: Префикс должен содержать только буквы в нижнем регистре (a-z) и цифры (0-9)!"
+        read -p 'Нажмите Enter, чтобы вернуться в меню...'
+        return
+    fi
+    
     # Замена строки с Bech32Prefix в Makefile (используем # как разделитель)
     sed -i "s#-X github.com/CosmWasm/wasmd/app.Bech32Prefix=[^ ]* #-X github.com/CosmWasm/wasmd/app.Bech32Prefix=${new_prefix} #" wasmd/Makefile
     if [ $? -eq 0 ]; then
