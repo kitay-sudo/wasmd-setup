@@ -1,6 +1,19 @@
 #!/bin/bash
 set -e
 
+# Функция для очистки строк от недопустимых символов
+sanitize_input() {
+    # Удаляем все непечатаемые и нестандартные символы, оставляем только ASCII
+    echo "$1" | tr -cd '[:print:][:cntrl:]' | tr -d '\r\n' | LC_ALL=C tr -dc 'a-zA-Z0-9-_/:.'
+}
+
+# Функция для обеспечения валидного bech32-строк
+validate_bech32_string() {
+    local input="$1"
+    # Оставляем только допустимые символы для bech32 (a-z0-9)
+    echo "$input" | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]'
+}
+
 # Загрузка переменных окружения из .env, если есть
 if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
@@ -162,10 +175,22 @@ function init_wasmd() {
         return
     fi
     cd wasmd
-    # Очищаем MONIKER и CHAIN_ID от символов новой строки
-    MONIKER_CLEAN=$(echo "$MONIKER" | tr -d '\r\n')
-    CHAIN_ID_CLEAN=$(echo "$CHAIN_ID" | tr -d '\r\n')
+    # Очищаем MONIKER и CHAIN_ID от символов новой строки и недопустимых символов
+    MONIKER_CLEAN=$(sanitize_input "$MONIKER")
+    CHAIN_ID_CLEAN=$(sanitize_input "$CHAIN_ID")
+    
+    echo "Инициализация узла с: MONIKER=$MONIKER_CLEAN, CHAIN_ID=$CHAIN_ID_CLEAN"
     wasmd init "$MONIKER_CLEAN" --chain-id "$CHAIN_ID_CLEAN" && echo "Узел wasmd успешно инициализирован!" || { echo "Ошибка при инициализации узла!"; cd ..; pause; return; }
+    
+    # Дополнительная очистка файлов конфигурации от символов переноса строки и других проблемных символов
+    echo "Очистка конфигурационных файлов от проблемных символов..."
+    find ~/.wasmd/config -type f -name "*.json" -o -name "*.toml" | while read file; do
+        echo "Обрабатываем $file"
+        TMP_FILE=$(mktemp)
+        tr -cd '\11\12\15\40-\176' < "$file" > "$TMP_FILE" # Оставляем только ASCII символы
+        mv "$TMP_FILE" "$file"
+    done
+    
     cd ..
     pause
 }
@@ -329,7 +354,12 @@ function add_validator_key() {
     fi
     cd wasmd
     read -p "Введите имя для ключа валидатора: " VALIDATOR_WALLET_NAME
-    wasmd keys add "$VALIDATOR_WALLET_NAME" && echo "Ключ валидатора '$VALIDATOR_WALLET_NAME' успешно создан!" || { echo "Ошибка при создании ключа валидатора!"; cd ..; pause; return; }
+    
+    # Очищаем имя от недопустимых символов
+    VALIDATOR_WALLET_NAME_CLEAN=$(sanitize_input "$VALIDATOR_WALLET_NAME")
+    
+    echo "Создание ключа валидатора с именем: $VALIDATOR_WALLET_NAME_CLEAN"
+    wasmd keys add "$VALIDATOR_WALLET_NAME_CLEAN" && echo "Ключ валидатора '$VALIDATOR_WALLET_NAME_CLEAN' успешно создан!" || { echo "Ошибка при создании ключа валидатора!"; cd ..; pause; return; }
     cd ..
     pause
 }
@@ -342,7 +372,12 @@ function add_wallet() {
     fi
     cd wasmd
     read -p "Введите имя для кошелька: " WALLET_NAME
-    wasmd keys add "$WALLET_NAME" && echo "Кошелек '$WALLET_NAME' успешно создан!" || { echo "Ошибка при создании кошелька!"; cd ..; pause; return; }
+    
+    # Очищаем имя от недопустимых символов
+    WALLET_NAME_CLEAN=$(sanitize_input "$WALLET_NAME")
+    
+    echo "Создание кошелька с именем: $WALLET_NAME_CLEAN"
+    wasmd keys add "$WALLET_NAME_CLEAN" && echo "Кошелек '$WALLET_NAME_CLEAN' успешно создан!" || { echo "Ошибка при создании кошелька!"; cd ..; pause; return; }
     cd ..
     pause
 }
@@ -357,15 +392,25 @@ function add_genesis_account() {
     read -p "Введите имя кошелька для добавления в генезис: " WALLET_NAME
     read -p "Введите количество монет для добавления: " AMOUNT
     
-    # Очищаем введенные данные от символов новой строки
-    WALLET_NAME_CLEAN=$(echo "$WALLET_NAME" | tr -d '\r\n')
-    AMOUNT_CLEAN=$(echo "$AMOUNT" | tr -d '\r\n')
+    # Очищаем введенные данные от недопустимых символов
+    WALLET_NAME_CLEAN=$(sanitize_input "$WALLET_NAME")
+    AMOUNT_CLEAN=$(sanitize_input "$AMOUNT")
     
-    # Очищаем переменную STAKE от символов переноса строки
-    STAKE_CLEAN=$(echo "$STAKE" | tr -d '\r\n')
+    # Очищаем переменную STAKE от символов переноса строки и недопустимых символов
+    STAKE_CLEAN=$(sanitize_input "$STAKE")
     
     # Получаем очищенный адрес
-    WALLET_ADDR=$(wasmd keys show "$WALLET_NAME_CLEAN" -a | tr -d '\r\n')
+    WALLET_ADDR=$(wasmd keys show "$WALLET_NAME_CLEAN" -a | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')
+    
+    # Проверяем, что получили допустимый адрес
+    if [ -z "$WALLET_ADDR" ]; then
+        echo "Ошибка: Не удалось получить адрес для кошелька '$WALLET_NAME_CLEAN'!"
+        cd ..
+        pause
+        return
+    fi
+    
+    echo "Получен адрес: $WALLET_ADDR"
     
     # Формируем сумму с очищенной деноминацией
     AMOUNT_WITH_DENOM="${AMOUNT_CLEAN}${STAKE_CLEAN}"
@@ -388,13 +433,26 @@ function create_and_collect_gentx() {
     read -p "Введите количество для gentx: " AMOUNT
     read -p "Введите chain-id: " CHAIN_ID
     
-    # Очищаем введенные данные от символов новой строки
-    VALIDATOR_WALLET_NAME_CLEAN=$(echo "$VALIDATOR_WALLET_NAME" | tr -d '\r\n')
-    AMOUNT_CLEAN=$(echo "$AMOUNT" | tr -d '\r\n')
-    CHAIN_ID_CLEAN=$(echo "$CHAIN_ID" | tr -d '\r\n')
+    # Очищаем введенные данные от недопустимых символов
+    VALIDATOR_WALLET_NAME_CLEAN=$(sanitize_input "$VALIDATOR_WALLET_NAME")
+    AMOUNT_CLEAN=$(sanitize_input "$AMOUNT")
+    CHAIN_ID_CLEAN=$(sanitize_input "$CHAIN_ID")
     
-    # Очищаем переменную STAKE от символов переноса строки
-    STAKE_CLEAN=$(echo "$STAKE" | tr -d '\r\n')
+    # Очищаем переменную STAKE от недопустимых символов
+    STAKE_CLEAN=$(sanitize_input "$STAKE")
+    
+    # Проверяем адрес валидатора
+    echo "Проверка валидатора '$VALIDATOR_WALLET_NAME_CLEAN'..."
+    VALIDATOR_ADDR=$(wasmd keys show "$VALIDATOR_WALLET_NAME_CLEAN" -a | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')
+    
+    if [ -z "$VALIDATOR_ADDR" ]; then
+        echo "Ошибка: Не удалось получить адрес для валидатора '$VALIDATOR_WALLET_NAME_CLEAN'!"
+        cd ..
+        pause
+        return
+    fi
+    
+    echo "Получен адрес валидатора: $VALIDATOR_ADDR"
     
     # Формируем суммы с очищенной деноминацией
     GENTX_AMOUNT_WITH_DENOM="${AMOUNT_CLEAN}${STAKE_CLEAN}"
@@ -402,7 +460,10 @@ function create_and_collect_gentx() {
     echo "Выполняем: wasmd genesis gentx $VALIDATOR_WALLET_NAME_CLEAN ${GENTX_AMOUNT_WITH_DENOM} --chain-id $CHAIN_ID_CLEAN"
     
     wasmd genesis gentx "$VALIDATOR_WALLET_NAME_CLEAN" "${GENTX_AMOUNT_WITH_DENOM}" --chain-id "$CHAIN_ID_CLEAN" && echo "gentx успешно создан!" || { echo "Ошибка при создании gentx!"; cd ..; pause; return; }
+    
+    echo "Сбор gentxs..."
     wasmd genesis collect-gentxs && echo "gentxs успешно собраны!" || { echo "Ошибка при сборе gentxs!"; cd ..; pause; return; }
+    
     echo
     echo "ID вашей ноды:" 
     wasmd tendermint show-node-id
