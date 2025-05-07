@@ -3,8 +3,16 @@ set -e
 
 # Функция для очистки строк от недопустимых символов
 sanitize_input() {
-    # Удаляем все непечатаемые и нестандартные символы, оставляем только ASCII
-    echo "$1" | tr -cd '[:print:][:cntrl:]' | tr -d '\r\n' | LC_ALL=C tr -dc 'a-zA-Z0-9-_/:.'
+    local input="$1"
+    local input_type="$2"
+    
+    if [ "$input_type" = "number" ]; then
+        # Для числовых значений оставляем только цифры
+        echo "$input" | tr -cd '0-9'
+    else
+        # Для обычного текста удаляем недопустимые символы
+        echo "$input" | tr -cd '[:print:][:cntrl:]' | tr -d '\r\n' | LC_ALL=C tr -dc 'a-zA-Z0-9-_/:.'
+    fi
 }
 
 # Функция для обеспечения валидного bech32-строк
@@ -109,14 +117,6 @@ if [ -z "$MIN_SIGNED_PER_WINDOW" ]; then read -p "Введите MIN_SIGNED_PER_
 if [ -z "$MINIMUM_GAS_PRICES" ]; then read -p "Введите MINIMUM_GAS_PRICES: " MINIMUM_GAS_PRICES; fi
 if [ -z "$SEND_AMOUNT" ]; then read -p "Введите SEND_AMOUNT: " SEND_AMOUNT; fi
 if [ -z "$GENTX_AMOUNT" ]; then read -p "Введите GENTX_AMOUNT: " GENTX_AMOUNT; fi
-
-clear
-
-echo "Установка wasmd: выберите роль"
-echo "1. Мастер-нода (создание сети)"
-echo "2. Валидатор (подключение к сети)"
-echo -n "Ваш выбор: "
-read NODE_TYPE
 
 function pause() {
     echo -e "\nНажмите Enter для возврата в меню..."
@@ -475,6 +475,233 @@ function add_genesis_account() {
     pause
 }
 
+
+function create_validator_from_json() {
+    if [ ! -d "wasmd" ]; then
+        echo "Сначала клонируйте репозиторий!"
+        pause
+        return
+    fi
+    cd wasmd
+    
+    # Проверяем, запущена ли нода
+    echo "Проверка доступности ноды..."
+    if ! wasmd status 2>/dev/null | grep -q "latest_block_height"; then
+        echo "Предупреждение: Нода не отвечает. Убедитесь, что она запущена (wasmd start)."
+        echo "Валидатор можно создать только на запущенной ноде."
+        cd ..
+        pause
+        return
+    fi
+    
+    # Получаем chain-id
+    read -p "Введите chain-id: " chain_id
+    chain_id=$(echo "$chain_id" | tr -d '\r\n')
+    if [[ -z "$chain_id" ]]; then
+        echo "Ошибка: chain-id не может быть пустым."
+        cd ..
+        pause
+        return
+    fi
+    echo "Chain-id: $chain_id"
+    
+    # Получаем токен из genesis.json
+    coin_prefix=$(jq -r '.app_state["staking"]["params"]["bond_denom"]' ~/.wasmd/config/genesis.json 2>/dev/null)
+    if [[ -z "$coin_prefix" ]]; then
+        coin_prefix=$(jq -r '.app_state.bank.balances[0].coins[0].denom // empty' ~/.wasmd/config/genesis.json 2>/dev/null)
+        if [ -z "$coin_prefix" ]; then
+            echo "Использую значение из переменной STAKE."
+            coin_prefix="$STAKE"
+        fi
+    fi
+    echo "Монета (токен): $coin_prefix"
+    
+    # Получаем имя кошелька
+    read -p "Введите имя ключа валидатора: " wallet_name
+    wallet_name=$(echo "$wallet_name" | tr -d '\r\n')
+    
+    # Проверяем, что кошелек существует
+    wasmd keys show "$wallet_name" --keyring-backend os > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo "Ошибка: Кошелек '$wallet_name' не найден."
+        cd ..
+        pause
+        return
+    fi
+    
+    # Запрашиваем moniker
+    read -p "Введите moniker (имя ноды): " moniker
+    moniker=$(echo "$moniker" | tr -d '\r\n')
+    
+    # Получаем публичный ключ валидатора
+    pubkey=$(wasmd tendermint show-validator)
+    if [ -z "$pubkey" ]; then
+        echo "Ошибка: Не удалось получить публичный ключ валидатора."
+        cd ..
+        pause
+        return
+    fi
+    key=$(echo "$pubkey" | jq -r '.key')
+    
+    # Конверсия: 1 токен = 1000000 микроединиц
+    token_to_micro=1000000
+    
+    # Запрос суммы для стейкинга
+    while true; do
+        read -p "Введите сумму для стейка валидатора (в $coin_prefix, минимум 1, без микроединиц): " input_amount_token
+        input_amount_token=$(echo "$input_amount_token" | tr -d '\r\n')
+        if [[ "$input_amount_token" =~ ^[0-9]+$ ]]; then
+            input_amount=$((input_amount_token * token_to_micro))
+            if (( input_amount < token_to_micro )); then
+                echo "Предупреждение: Введено меньше минимальной суммы для стейкинга (1 $coin_prefix). Пожалуйста, введите сумму не менее 1 $coin_prefix."
+                continue
+            fi
+            break
+        else
+            echo "Предупреждение: Введено некорректное значение суммы. Пожалуйста, введите только цифры (например, 3000000)."
+        fi
+    done
+    
+    # Запрос минимального self-delegation
+    while true; do
+        read -p "Введите минимальную сумму самоделегирования (в $coin_prefix, минимум 1, без микроединиц): " min_self_delegation
+        min_self_delegation=$(echo "$min_self_delegation" | tr -d '\r\n')
+        if [[ "$min_self_delegation" =~ ^[0-9]+$ ]]; then
+            min_amount=$((min_self_delegation * token_to_micro))
+            if (( min_amount < token_to_micro )); then
+                echo "Предупреждение: Введено меньше минимальной суммы для активации (1 $coin_prefix). Пожалуйста, введите сумму не менее 1 $coin_prefix."
+                continue
+            fi
+            if (( min_amount > input_amount )); then
+                echo "Предупреждение: Минимальная сумма самоделегирования не может быть больше суммы стейка. Пожалуйста, введите сумму не более $input_amount_token."
+                continue
+            fi
+            break
+        else
+            echo "Предупреждение: Введено некорректное значение минимальной суммы. Пожалуйста, введите только цифры (например, 1000000)."
+        fi
+    done
+    
+    # Формируем суммы с деноминацией
+    amount="${input_amount}${coin_prefix}"
+    
+    # Создаем файл validator.json
+    validator_file="./validator.json"
+    cat >"$validator_file" <<EOL
+{
+    "pubkey": {
+        "@type": "/cosmos.crypto.ed25519.PubKey",
+        "key": "$key"
+    },
+    "amount": "$amount",
+    "moniker": "$moniker",
+    "identity": "",
+    "website": "",
+    "security": "",
+    "details": "",
+    "commission-rate": "0.10",
+    "commission-max-rate": "0.20",
+    "commission-max-change-rate": "0.01",
+    "min-self-delegation": "$min_self_delegation"
+}
+EOL
+    
+    echo "Файл $validator_file создан:"
+    cat "$validator_file"
+    
+    # Выводим информацию о команде
+    echo "Создание валидатора с помощью файла..."
+    echo "Выполняем команду:"
+    echo "wasmd tx staking create-validator \"$validator_file\" --from=\"$wallet_name\" --chain-id=\"$chain_id\" --gas=\"auto\" --gas-adjustment=1.2 --gas-prices=\"0.0001${coin_prefix}\" -y --keyring-backend os"
+    
+    # Создаем валидатора
+    wasmd tx staking create-validator "$validator_file" \
+        --from="$wallet_name" \
+        --chain-id="$chain_id" \
+        --gas="auto" \
+        --gas-adjustment=1.2 \
+        --gas-prices="0.0001${coin_prefix}" \
+        -y \
+        --keyring-backend os
+    
+    if [ $? -ne 0 ]; then
+        echo "Ошибка: Создание валидатора завершилось неудачей."
+        cd ..
+        pause
+        return
+    fi
+    
+    # Пауза для завершения транзакции
+    echo "Ожидание подтверждения транзакции..."
+    sleep 5
+    
+    # Запрашиваем список валидаторов
+    echo "Запрос списка валидаторов..."
+    validators=$(wasmd query staking validators --output json 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$validators" ]; then
+        echo "Предупреждение: Не удалось получить список валидаторов. Проверьте статус ноды."
+        cd ..
+        pause
+        return
+    fi
+    
+    # Выводим всех валидаторов
+    echo "Список всех валидаторов:"
+    wasmd query staking validators --output json | jq '.validators[] | {moniker: .description.moniker, tokens: .tokens, status: .status}'
+    
+    # Запрашиваем информацию о нашем валидаторе
+    validator_info=$(echo "$validators" | jq -r ".validators[] | select(.description.moniker == \"$moniker\")")
+    if [ -z "$validator_info" ]; then
+        echo "Предупреждение: Валидатор с moniker '$moniker' не найден в списке. Возможно, транзакция еще не подтверждена."
+        cd ..
+        pause
+        return
+    fi
+    
+    # Извлекаем данные валидатора
+    operator_address=$(echo "$validator_info" | jq -r '.operator_address')
+    tokens=$(echo "$validator_info" | jq -r '.tokens')
+    status=$(echo "$validator_info" | jq -r '.status')
+    
+    # Выводим информацию о валидаторе
+    echo "Валидатор успешно создан! Вот его данные:"
+    echo "MONIKER: $moniker"
+    echo "Адрес валидатора: $operator_address"
+    echo "Баланс токенов: $tokens $coin_prefix"
+    
+    # Проверка статуса валидатора
+    if [ "$status" == "BOND_STATUS_BONDED" ]; then
+        echo "🎉 Ваша нода начинает участвовать в консенсусе и подписывать блоки. Статус: Активен"
+    else
+        echo "⚠️ Ваша нода не участвует в консенсусе. Статус: $status"
+    fi
+    
+    cd ..
+    pause
+}
+
+function create_validator() {
+    if [ ! -d "wasmd" ]; then
+        echo "Сначала клонируйте репозиторий!"
+        pause
+        return
+    fi
+    
+    clear
+    echo "Выберите способ создания валидатора:"
+    echo "1. Создать валидатора в genesis-файле (для мастер-ноды)"
+    echo "2. Создать валидатора через JSON-файл (для подключения к существующей сети)"
+    echo "3. Вернуться в главное меню"
+    read -p "Ваш выбор: " validator_option
+    
+    case $validator_option in
+        1) create_and_collect_gentx ;;
+        2) create_validator_from_json ;;
+        3) return ;;
+        *) echo "Неверный выбор!"; pause ;;
+    esac
+} 
+
 function create_and_collect_gentx() {
     if [ ! -d "wasmd" ]; then
         echo "Сначала клонируйте репозиторий!"
@@ -482,44 +709,157 @@ function create_and_collect_gentx() {
         return
     fi
     cd wasmd
-    read -p "Введите имя ключа валидатора для gentx: " VALIDATOR_WALLET_NAME
-    read -p "Введите количество для gentx: " AMOUNT
-    read -p "Введите chain-id: " CHAIN_ID
     
-    # Очищаем введенные данные от недопустимых символов
-    VALIDATOR_WALLET_NAME_CLEAN=$(sanitize_input "$VALIDATOR_WALLET_NAME")
-    AMOUNT_CLEAN=$(sanitize_input "$AMOUNT")
-    CHAIN_ID_CLEAN=$(sanitize_input "$CHAIN_ID")
-    
-    # Очищаем переменную STAKE от недопустимых символов
-    STAKE_CLEAN=$(sanitize_input "$STAKE")
-    
-    # Проверяем адрес валидатора
-    echo "Проверка валидатора '$VALIDATOR_WALLET_NAME_CLEAN'..."
-    VALIDATOR_ADDR=$(wasmd keys show "$VALIDATOR_WALLET_NAME_CLEAN" -a | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')
-    
-    if [ -z "$VALIDATOR_ADDR" ]; then
-        echo "Ошибка: Не удалось получить адрес для валидатора '$VALIDATOR_WALLET_NAME_CLEAN'!"
+    # Проверка существования genesis.json
+    if [[ ! -f ~/.wasmd/config/genesis.json ]]; then
+        echo "Ошибка: Файл genesis.json не найден. Убедитесь, что нода была правильно инициализирована."
         cd ..
         pause
         return
     fi
+
+    # Проверка наличия утилиты jq
+    if ! command -v jq &> /dev/null; then
+        echo "Ошибка: Утилита 'jq' не найдена. Установите её с помощью команды: sudo apt install jq"
+        cd ..
+        pause
+        return
+    fi
+
+    # Запрос chain-id от пользователя
+    read -p "Введите chain-id: " chain_id
+    chain_id=$(echo "$chain_id" | tr -d '\r\n')
+    if [[ -z "$chain_id" ]]; then
+        echo "Ошибка: chain-id не может быть пустым."
+        cd ..
+        pause
+        return
+    fi
+    echo "Chain-id: $chain_id"
+
+    # Извлечение bond_denom (префикс монеты) из genesis.json
+    coin_prefix=$(jq -r '.app_state["staking"]["params"]["bond_denom"]' ~/.wasmd/config/genesis.json)
+    if [[ -z "$coin_prefix" ]]; then
+        coin_prefix=$(jq -r '.app_state.bank.balances[0].coins[0].denom // empty' ~/.wasmd/config/genesis.json)
+        if [ -z "$coin_prefix" ]; then
+            echo "Ошибка: Не удалось получить токен (bond_denom) из genesis.json. Используем значение из переменной STAKE."
+            coin_prefix="$STAKE"
+        fi
+    fi
+    echo "Монета (токен): $coin_prefix"
     
-    echo "Получен адрес валидатора: $VALIDATOR_ADDR"
+    # Получение имени кошелька
+    read -p "Введите имя ключа валидатора для gentx: " wallet_name
+    wallet_name=$(echo "$wallet_name" | tr -d '\r\n')
     
-    # Формируем суммы с очищенной деноминацией
-    GENTX_AMOUNT_WITH_DENOM="${AMOUNT_CLEAN}${STAKE_CLEAN}"
+    # Получаем moniker из config.toml или запрашиваем его
+    read -p "Введите moniker (имя ноды): " moniker
+    moniker=$(echo "$moniker" | tr -d '\r\n')
+    echo "Moniker: $moniker"
+
+    # Конверсия: 1 токен = 1000000 микроединиц
+    token_to_micro=1
+
+    # Запрос суммы для стейкинга напрямую
+    while true; do
+        read -p "Введите сумму для стейка валидатора (в $coin_prefix, минимум 1, без микроединиц): " input_amount_token
+        input_amount_token=$(echo "$input_amount_token" | tr -d '\r\n')
+        if [[ "$input_amount_token" =~ ^[0-9]+$ ]]; then
+            input_amount=$((input_amount_token * token_to_micro))
+            if (( input_amount < token_to_micro )); then
+                echo "Предупреждение: Введено меньше минимальной суммы для стейкинга (1 $coin_prefix). Пожалуйста, введите сумму не менее 1 $coin_prefix."
+                continue
+            fi
+            break
+        else
+            echo "Предупреждение: Введено некорректное значение суммы. Пожалуйста, введите только цифры (например, 3000000)."
+        fi
+    done
     
-    echo "Выполняем: wasmd genesis gentx $VALIDATOR_WALLET_NAME_CLEAN ${GENTX_AMOUNT_WITH_DENOM} --chain-id $CHAIN_ID_CLEAN"
+    # Запрос минимального self-delegation
+    while true; do
+        read -p "Введите минимальную сумму самоделегирования (в $coin_prefix, минимум 1, без микроединиц): " min_self_delegation
+        min_self_delegation=$(echo "$min_self_delegation" | tr -d '\r\n')
+        if [[ "$min_self_delegation" =~ ^[0-9]+$ ]]; then
+            min_amount=$((min_self_delegation * token_to_micro))
+            if (( min_amount < token_to_micro )); then
+                echo "Предупреждение: Введено меньше минимальной суммы для активации (1 $coin_prefix). Пожалуйста, введите сумму не менее 1 $coin_prefix."
+                continue
+            fi
+            if (( min_amount > input_amount )); then
+                echo "Предупреждение: Минимальная сумма самоделегирования не может быть больше суммы стейка. Пожалуйста, введите сумму не более $input_amount_token."
+                continue
+            fi
+            break
+        else
+            echo "Предупреждение: Введено некорректное значение минимальной суммы. Пожалуйста, введите только цифры (например, 1000000)."
+        fi
+    done
     
-    wasmd genesis gentx "$VALIDATOR_WALLET_NAME_CLEAN" "${GENTX_AMOUNT_WITH_DENOM}" --chain-id "$CHAIN_ID_CLEAN" && echo "gentx успешно создан!" || { echo "Ошибка при создании gentx!"; cd ..; pause; return; }
+    # Формируем суммы с деноминацией
+    amount_with_prefix="${input_amount}${coin_prefix}"
+
+    # Вывод информации о команде
+    echo "Создание генезис-транзакции для стейка валидатора от кошелька '$wallet_name' с суммой $input_amount_token $coin_prefix (в микроединицах: $amount_with_prefix)..."
+
+    # Формирование и вывод команды для проверки
+    echo "Выполняем команду:"
+    echo "wasmd genesis gentx \"$wallet_name\" \"$amount_with_prefix\" \\"
+    echo "  --chain-id \"$chain_id\" \\"
+    echo "  --moniker \"$moniker\" \\"
+    echo "  --commission-rate \"0.10\" \\"
+    echo "  --commission-max-rate \"0.20\" \\"
+    echo "  --commission-max-change-rate \"0.01\" \\"
+    echo "  --min-self-delegation \"$min_self_delegation\" \\"
+    echo "  --from \"$wallet_name\" \\"
+    echo "  --keyring-backend os"
+
+    # Выполнение команды wasmd genesis gentx
+    wasmd genesis gentx "$wallet_name" "$amount_with_prefix" \
+        --chain-id "$chain_id" \
+        --moniker "$moniker" \
+        --commission-rate "0.10" \
+        --commission-max-rate "0.20" \
+        --commission-max-change-rate "0.01" \
+        --min-self-delegation "$min_self_delegation" \
+        --from "$wallet_name" \
+        --keyring-backend os \
+        --home "$HOME/.wasmd"
     
-    echo "Сбор gentxs..."
-    wasmd genesis collect-gentxs && echo "gentxs успешно собраны!" || { echo "Ошибка при сборе gentxs!"; cd ..; pause; return; }
+    # Проверка результата выполнения команды
+    if [ $? -ne 0 ]; then
+        echo "Ошибка при создании генезис-транзакции. Проверьте правильность параметров и доступный баланс."
+        cd ..
+        pause
+        return
+    fi
+
+    # Явная проверка наличия файла в директории ~/.wasmd/config/gentx
+    gentx_dir=~/.wasmd/config/gentx
+    if [[ ! -d "$gentx_dir" ]]; then
+        echo "Ошибка: Директория $gentx_dir не существует. Проверьте настройки вашей ноды."
+        cd ..
+        pause
+        return
+    fi
+
+    # Поиск файла генезис-транзакции
+    gentx_file=$(find "$gentx_dir" -type f -name "gentx-*.json" | head -n 1)
+    if [[ -f "$gentx_file" ]]; then
+        echo "✅ Генезис-транзакция создана успешно."
+        echo "Файл генезис-транзакции найден: $gentx_file"
+        
+        # Сбор gentx автоматически
+        echo "Сбор gentxs..."
+        wasmd genesis collect-gentxs && echo "gentxs успешно собраны!" || { echo "Ошибка при сборе gentxs!"; cd ..; pause; return; }
+        
+        echo
+        echo "ID вашей ноды:" 
+        wasmd tendermint show-node-id
+    else
+        echo "❌ Ошибка: Файл генезис-транзакции не найден в директории $gentx_dir. Проверьте логи wasmd для подробностей."
+    fi
     
-    echo
-    echo "ID вашей ноды:" 
-    wasmd tendermint show-node-id
     cd ..
     pause
 }
@@ -704,9 +1044,17 @@ function send_tokens() {
     # Формируем сумму с очищенной деноминацией
     AMOUNT_WITH_DENOM="${AMOUNT_CLEAN}${STAKE_CLEAN}"
     
-    echo "Выполняем: wasmd tx bank send $MASTER_ADDR_CLEAN $VALIDATOR2_ADDR_CLEAN $AMOUNT_WITH_DENOM --chain-id $CHAIN_ID_CLEAN"
+    # Добавляем параметр --fees для покрытия комиссии транзакции
+    # Стандартное значение для комиссии (минимум 20 токенов)
+    FEES="20${STAKE_CLEAN}"
     
-    wasmd tx bank send "$MASTER_ADDR_CLEAN" "$VALIDATOR2_ADDR_CLEAN" "$AMOUNT_WITH_DENOM" --chain-id "$CHAIN_ID_CLEAN" --yes
+    echo "Выполняем: wasmd tx bank send $MASTER_ADDR_CLEAN $VALIDATOR2_ADDR_CLEAN $AMOUNT_WITH_DENOM --chain-id $CHAIN_ID_CLEAN --fees $FEES"
+    
+    wasmd tx bank send "$MASTER_ADDR_CLEAN" "$VALIDATOR2_ADDR_CLEAN" "$AMOUNT_WITH_DENOM" \
+        --chain-id "$CHAIN_ID_CLEAN" \
+        --fees "$FEES" \
+        --keyring-backend os \
+        --yes
     
     pause
 }
@@ -928,85 +1276,184 @@ function test_run() {
     pause
 }
 
-if [ "$NODE_TYPE" = "1" ]; then
-    # Мастер-нода: только нужные пункты
+function collect_node_ids() {
+    if [ ! -d "wasmd" ]; then
+        echo "Сначала клонируйте репозиторий!"
+        pause
+        return
+    fi
+    
+    echo "Сбор информации о нодах для persistent_peers"
+    echo "Введите информацию о нодах (пустая строка для завершения):"
+    
+    PEERS=""
     while true; do
-        clear
-        echo "Мастер-нода wasmd: меню установки"
-        echo "1. Клонировать репозиторий блокчейна"
-        echo "2. Установить зависимости для сборки"
-        echo "3. Установить Bech32-префикс"
-        echo "4. Собрать и установить wasmd"
-        echo "5. Инициализировать узел wasmd"
-        echo "6. Настроить конфигурацию wasmd"
-        echo "7. Создать ключ валидатора"
-        echo "8. Добавить аккаунт в генезис"
-        echo "9. Создать и собрать gentx"
-        echo "10. Показать ID ноды"
-        echo "11. Копировать genesis.json на другую ноду"
-        echo "12. Создать systemd-сервис и добавить в автозагрузку"
-        echo "13. Настроить файрвол (nftables) для защиты нод"
-        echo "14. Утилиты/дополнительные действия"
-        echo "15. Выйти"
-        echo -n "Выберите пункт меню: "
-        read choice
-        case $choice in
-            1) clone_repo ;;
-            2) install_deps ;;
-            3) set_bech32_prefix ;;
-            4) build_wasmd ;;
-            5) init_wasmd ;;
-            6) configure_wasmd ;;
-            7) add_validator_key ;;
-            8) add_genesis_account ;;
-            9) create_and_collect_gentx ;;
-            10) show_node_id ;;
-            11) copy_genesis_to_node ;;
-            12) create_systemd_service ;;
-            13) setup_nftables ;;
-            14) helper_menu ;;
-            15) echo "Выход."; exit 0 ;;
-            *) echo "Неверный выбор!"; pause ;;
-        esac
+        read -p "IP-адрес ноды (или Enter для завершения): " NODE_IP
+        if [ -z "$NODE_IP" ]; then
+            break
+        fi
+        
+        read -p "ID ноды: " NODE_ID
+        if [ -z "$NODE_ID" ]; then
+            echo "ID ноды не может быть пустым!"
+            continue
+        fi
+        
+        # Очищаем введенные данные от недопустимых символов
+        NODE_IP_CLEAN=$(sanitize_input "$NODE_IP")
+        NODE_ID_CLEAN=$(sanitize_input "$NODE_ID")
+        
+        # Формируем строку для одной ноды
+        NODE_STRING="${NODE_ID_CLEAN}@${NODE_IP_CLEAN}:26656"
+        
+        if [ -z "$PEERS" ]; then
+            PEERS="$NODE_STRING"
+        else
+            PEERS="$PEERS,$NODE_STRING"
+        fi
+        
+        echo "Сформированная строка для ноды: $NODE_STRING"
     done
-elif [ "$NODE_TYPE" = "2" ]; then
-    # Валидатор: только нужные пункты
-    while true; do
-        clear
-        echo "Валидатор wasmd: меню установки"
-        echo "1. Клонировать репозиторий блокчейна"
-        echo "2. Установить зависимости для сборки"
-        echo "3. Установить Bech32-префикс"
-        echo "4. Собрать и установить wasmd"
-        echo "5. Инициализировать узел wasmd"
-        echo "6. Настроить конфигурацию wasmd"
-        echo "7. Создать кошелек"
-        echo "8. Создать валидатора через файл (validator.json)"
-        echo "9. Показать ID ноды"
-        echo "10. Создать systemd-сервис и добавить в автозагрузку"
-        echo "11. Настроить файрвол (nftables) для защиты нод"
-        echo "12. Утилиты/дополнительные действия"
-        echo "13. Выйти"
-        echo -n "Выберите пункт меню: "
-        read choice
-        case $choice in
-            1) clone_repo ;;
-            2) install_deps ;;
-            3) set_bech32_prefix ;;
-            4) build_wasmd ;;
-            5) init_wasmd ;;
-            6) configure_wasmd ;;
-            7) add_wallet ;;
-            8) create_validator_from_file ;;
-            9) show_node_id ;;
-            10) create_systemd_service ;;
-            11) setup_nftables ;;
-            12) helper_menu ;;
-            13) echo "Выход."; exit 0 ;;
-            *) echo "Неверный выбор!"; pause ;;
-        esac
-    done
-else
-    echo "Неверный выбор! Перезапустите скрипт."
-    exit 1
-fi 
+    
+    if [ ! -z "$PEERS" ]; then
+        echo
+        echo "Итоговая строка persistent_peers:"
+        echo "$PEERS"
+        echo
+        echo "Скопируйте эту строку и используйте её в config.toml"
+    else
+        echo "⚠️ Не было добавлено ни одной ноды"
+    fi
+    
+    pause
+}
+
+function create_master_validator() {
+    if [ ! -d "wasmd" ]; then
+        echo "Сначала клонируйте репозиторий!"
+        pause
+        return
+    fi
+    cd wasmd
+    
+    # Запрашиваем необходимые данные
+    read -p "Введите имя ключа валидатора: " VALIDATOR_WALLET_NAME
+    read -p "Введите количество монет для стейкинга: " STAKE_AMOUNT
+    read -p "Введите chain-id: " CHAIN_ID
+    
+    # Очищаем введенные данные
+    VALIDATOR_WALLET_NAME_CLEAN=$(sanitize_input "$VALIDATOR_WALLET_NAME")
+    STAKE_AMOUNT_CLEAN=$(sanitize_input "$STAKE_AMOUNT")
+    CHAIN_ID_CLEAN=$(sanitize_input "$CHAIN_ID")
+    STAKE_CLEAN=$(sanitize_input "$STAKE")
+    
+    # Получаем адрес валидатора (без очистки!)
+    VALIDATOR_ADDR=$(wasmd keys show "$VALIDATOR_WALLET_NAME_CLEAN" -a --keyring-backend os)
+    if [ -z "$VALIDATOR_ADDR" ]; then
+        echo "Ошибка: Не удалось получить адрес валидатора!"
+        cd ..
+        pause
+        return
+    fi
+    
+    # Формируем сумму с деноминацией
+    STAKE_WITH_DENOM="${STAKE_AMOUNT_CLEAN}${STAKE_CLEAN}"
+    
+    echo "Создание валидатора в генезисе..."
+    echo "Имя: $VALIDATOR_WALLET_NAME_CLEAN"
+    echo "Адрес: $VALIDATOR_ADDR"
+    echo "Сумма стейкинга: $STAKE_WITH_DENOM"
+    echo "Chain ID: $CHAIN_ID_CLEAN"
+    
+    # Создаем gentx со всеми необходимыми параметрами
+    wasmd genesis gentx "$VALIDATOR_WALLET_NAME_CLEAN" "$STAKE_WITH_DENOM" \
+        --chain-id "$CHAIN_ID_CLEAN" \
+        --moniker "$VALIDATOR_WALLET_NAME_CLEAN" \
+        --commission-rate "0.10" \
+        --commission-max-rate "0.20" \
+        --commission-max-change-rate "0.01" \
+        --min-self-delegation "1" \
+        --keyring-backend os \
+        --home "$HOME/.wasmd"
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ Gentx успешно создан!"
+        
+        # Собираем все gentx
+        echo "Сбор всех gentx..."
+        wasmd genesis collect-gentxs
+        
+        echo "✅ Валидатор успешно добавлен в генезис!"
+        echo "ID вашей ноды:"
+        wasmd tendermint show-node-id
+    else
+        echo "❌ Ошибка при создании gentx!"
+    fi
+    
+    cd ..
+    pause
+}
+
+# Основной цикл меню
+while true; do
+    clear
+    echo "=========================================================="
+    echo "                  WASMD: Меню Установки                   "
+    echo "=========================================================="
+    echo "1.  Клонировать репозиторий блокчейна"
+    echo "2.  Установить зависимости для сборки"
+    echo "3.  Установить Bech32-префикс"
+    echo "4.  Собрать и установить wasmd"
+    echo "5.  Инициализировать узел wasmd"
+    echo "6.  Настроить конфигурацию wasmd"
+    echo "7.  Создать ключ валидатора"
+    echo "8.  Создать обычный кошелек"
+    echo "9.  Добавить аккаунт в генезис"
+    echo "10. Создать валидатора в генезисе"
+    echo "11. Создать и собрать gentx"
+    echo "12. Создать валидатора через JSON"
+    echo "13. Показать ID ноды"
+    echo "14. Копировать genesis.json на другую ноду"
+    echo "15. Создать systemd-сервис и добавить в автозагрузку"
+    echo "16. Настроить файрвол (nftables) для защиты нод"
+    echo "17. Запустить ноду wasmd (foreground)"
+    echo "18. Отправить монеты (tx bank send)"
+    echo "19. Просмотреть логи"
+    echo "20. Резервное копирование файлов"
+    echo "21. Проверить статус сервиса"
+    echo "22. Тестовый запуск"
+    echo "23. Собрать ID нод для config.toml"
+    echo "0.  Выйти"
+    echo "----------------------------------------------------------"
+    echo -n "Выберите пункт меню: "
+    read choice
+    
+    case $choice in
+        1) clone_repo ;;
+        2) install_deps ;;
+        3) set_bech32_prefix ;;
+        4) build_wasmd ;;
+        5) init_wasmd ;;
+        6) configure_wasmd ;;
+        7) add_validator_key ;;
+        8) add_wallet ;;
+        9) add_genesis_account ;;
+        10) create_master_validator ;;
+        11) create_and_collect_gentx ;;
+        12) create_validator_from_json ;;
+        13) show_node_id ;;
+        14) copy_genesis_to_node ;;
+        15) create_systemd_service ;;
+        16) setup_nftables ;;
+        17) start_wasmd_node ;;
+        18) send_tokens ;;
+        19) view_logs ;;
+        20) backup_files ;;
+        21) check_service_status ;;
+        22) test_run ;;
+        23) collect_node_ids ;;
+        0) echo "Выход."; exit 0 ;;
+        *) echo "Неверный выбор!"; pause ;;
+    esac
+done
+
