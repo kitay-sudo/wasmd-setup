@@ -22,6 +22,24 @@ validate_bech32_string() {
     echo "$input" | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]'
 }
 
+# Функция для определения доступного keyring-backend
+detect_keyring_backend() {
+    # Пробуем os backend
+    if timeout 5s wasmd keys list --keyring-backend os >/dev/null 2>&1; then
+        echo "os"
+        return
+    fi
+    
+    # Пробуем test backend
+    if timeout 5s wasmd keys list --keyring-backend test >/dev/null 2>&1; then
+        echo "test"
+        return
+    fi
+    
+    # По умолчанию возвращаем test
+    echo "test"
+}
+
 # Загрузка переменных окружения из .env, если есть
 if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
@@ -406,15 +424,45 @@ function add_validator_key() {
         return
     fi
     cd wasmd
+    
+    echo "=========================================================="
+    echo "               СОЗДАНИЕ КЛЮЧА ВАЛИДАТОРА                 "
+    echo "=========================================================="
+    echo ""
+    
     read -p "Введите имя для ключа валидатора: " VALIDATOR_WALLET_NAME
     
     # Очищаем имя от недопустимых символов
     VALIDATOR_WALLET_NAME_CLEAN=$(sanitize_input "$VALIDATOR_WALLET_NAME")
     
+    echo ""
     echo "Создание ключа валидатора с именем: $VALIDATOR_WALLET_NAME_CLEAN"
-    wasmd keys add "$VALIDATOR_WALLET_NAME_CLEAN" && echo "Ключ валидатора '$VALIDATOR_WALLET_NAME_CLEAN' успешно создан!" || { echo "Ошибка при создании ключа валидатора!"; cd ..; pause; return; }
+    echo ""
+    echo "⚠️ ВАЖНО: Сохраните mnemonic фразу в безопасном месте!"
+    echo "Без неё вы не сможете восстановить кошелек!"
+    echo ""
+    
+    # Пытаемся создать ключ с разными keyring-backend
+    if wasmd keys add "$VALIDATOR_WALLET_NAME_CLEAN" --keyring-backend os 2>/dev/null; then
+        echo "✅ Ключ валидатора '$VALIDATOR_WALLET_NAME_CLEAN' успешно создан с keyring-backend os!"
+    elif wasmd keys add "$VALIDATOR_WALLET_NAME_CLEAN" --keyring-backend test 2>/dev/null; then
+        echo "✅ Ключ валидатора '$VALIDATOR_WALLET_NAME_CLEAN' успешно создан с keyring-backend test!"
+        echo "⚠️ Использован test keyring - подходит для тестирования"
+    else
+        echo "❌ Ошибка при создании ключа валидатора!"
+        echo "Попробуйте создать ключ вручную:"
+        echo "wasmd keys add $VALIDATOR_WALLET_NAME_CLEAN --keyring-backend test"
+    fi
+    
+    echo ""
+    echo "📋 Проверка созданного ключа:"
+    echo "Список всех ключей:"
+    wasmd keys list --keyring-backend os 2>/dev/null || wasmd keys list --keyring-backend test 2>/dev/null || echo "Не удалось получить список ключей"
+    
     cd ..
-    pause
+    echo ""
+    echo "Нажмите Enter для возврата в меню..."
+    read
 }
 
 function add_wallet() {
@@ -424,15 +472,48 @@ function add_wallet() {
         return
     fi
     cd wasmd
+    
+    echo "=========================================================="
+    echo "                  СОЗДАНИЕ КОШЕЛЬКА                      "
+    echo "=========================================================="
+    echo ""
+    
     read -p "Введите имя для кошелька: " WALLET_NAME
     
     # Очищаем имя от недопустимых символов
     WALLET_NAME_CLEAN=$(sanitize_input "$WALLET_NAME")
     
+    # Определяем keyring-backend
+    KEYRING_BACKEND=$(detect_keyring_backend)
+    echo "Используется keyring-backend: $KEYRING_BACKEND"
+    
+    echo ""
     echo "Создание кошелька с именем: $WALLET_NAME_CLEAN"
-    wasmd keys add "$WALLET_NAME_CLEAN" && echo "Кошелек '$WALLET_NAME_CLEAN' успешно создан!" || { echo "Ошибка при создании кошелька!"; cd ..; pause; return; }
+    echo ""
+    echo "⚠️ ВАЖНО: Сохраните mnemonic фразу в безопасном месте!"
+    echo "Без неё вы не сможете восстановить кошелек!"
+    echo ""
+    
+    # Создаем кошелек с определенным keyring-backend
+    if wasmd keys add "$WALLET_NAME_CLEAN" --keyring-backend "$KEYRING_BACKEND"; then
+        echo ""
+        echo "✅ Кошелек '$WALLET_NAME_CLEAN' успешно создан!"
+        
+        # Показываем адрес
+        echo ""
+        echo "📍 Адрес кошелька:"
+        timeout 10s wasmd keys show "$WALLET_NAME_CLEAN" -a --keyring-backend "$KEYRING_BACKEND" 2>/dev/null || echo "Не удалось получить адрес"
+        
+    else
+        echo "❌ Ошибка при создании кошелька!"
+        echo "Попробуйте создать кошелек вручную:"
+        echo "wasmd keys add $WALLET_NAME_CLEAN --keyring-backend $KEYRING_BACKEND"
+    fi
+    
     cd ..
-    pause
+    echo ""
+    echo "Нажмите Enter для возврата в меню..."
+    read
 }
 
 function add_genesis_account() {
@@ -452,12 +533,24 @@ function add_genesis_account() {
     # Очищаем переменную STAKE от символов переноса строки и недопустимых символов
     STAKE_CLEAN=$(sanitize_input "$STAKE")
     
+    # Определяем keyring-backend
+    KEYRING_BACKEND=$(detect_keyring_backend)
+    echo "Используется keyring-backend: $KEYRING_BACKEND"
+    
     # Получаем очищенный адрес
-    WALLET_ADDR=$(wasmd keys show "$WALLET_NAME_CLEAN" -a | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')
+    echo "Получение адреса кошелька '$WALLET_NAME_CLEAN'..."
+    WALLET_ADDR=$(timeout 10s wasmd keys show "$WALLET_NAME_CLEAN" -a --keyring-backend "$KEYRING_BACKEND" 2>/dev/null | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')
     
     # Проверяем, что получили допустимый адрес
     if [ -z "$WALLET_ADDR" ]; then
-        echo "Ошибка: Не удалось получить адрес для кошелька '$WALLET_NAME_CLEAN'!"
+        echo "❌ Ошибка: Не удалось получить адрес для кошелька '$WALLET_NAME_CLEAN'!"
+        echo ""
+        echo "Возможные причины:"
+        echo "1. Кошелек не существует"
+        echo "2. Неправильный keyring-backend"
+        echo "3. Требуется пароль"
+        echo ""
+        echo "💡 Сначала создайте кошелек (пункт 7)"
         cd ..
         pause
         return
@@ -752,13 +845,39 @@ function create_and_collect_gentx() {
     read -p "Введите имя ключа валидатора для gentx: " wallet_name
     wallet_name=$(echo "$wallet_name" | tr -d '\r\n')
     
+    # Определяем доступный keyring-backend
+    echo "Определение keyring-backend..."
+    KEYRING_BACKEND=$(detect_keyring_backend)
+    echo "Используется keyring-backend: $KEYRING_BACKEND"
+    
     # Проверяем, что кошелек существует
-    if ! wasmd keys show "$wallet_name" --keyring-backend os > /dev/null 2>&1; then
-        echo "Ошибка: Кошелек '$wallet_name' не найден."
-        echo "Сначала создайте кошелек валидатора (пункт 7) и добавьте его в генезис (пункт 9)."
-        cd ..
-        pause
-        return
+    echo "Проверка существования кошелька '$wallet_name'..."
+    
+    # Используем timeout для предотвращения зависания
+    if timeout 10s wasmd keys show "$wallet_name" --keyring-backend "$KEYRING_BACKEND" > /dev/null 2>&1; then
+        echo "✅ Кошелек '$wallet_name' найден"
+    else
+        echo "❌ Ошибка: Кошелек '$wallet_name' не найден или недоступен."
+        echo ""
+        echo "Возможные причины:"
+        echo "1. Кошелек не был создан (выполните пункт 7)"
+        echo "2. Кошелек создан с другим keyring-backend"
+        echo "3. Требуется пароль для доступа к keyring"
+        echo ""
+        echo "💡 Попробуйте:"
+        echo "- Создать кошелек валидатора (пункт 7)"
+        echo "- Добавить аккаунт в генезис (пункт 9)"
+        echo "- Или использовать другой keyring-backend"
+        echo ""
+        
+        read -p "Продолжить без проверки кошелька? (yes/no): " continue_anyway
+        if [[ "$continue_anyway" != "yes" ]]; then
+            echo "Операция отменена."
+            cd ..
+            pause
+            return
+        fi
+        echo "⚠️ Продолжаем без проверки кошелька..."
     fi
     
     # Получаем moniker из config.toml или запрашиваем его
@@ -834,7 +953,7 @@ function create_and_collect_gentx() {
         --commission-max-change-rate "0.01" \
         --min-self-delegation "$min_self_delegation" \
         --from "$wallet_name" \
-        --keyring-backend os \
+        --keyring-backend "$KEYRING_BACKEND" \
         --home "$HOME/.wasmd"
     
     # Проверка результата выполнения команды
@@ -1435,13 +1554,19 @@ function diagnose_node() {
     echo ""
     echo "3. Проверка ключей..."
     if command -v wasmd &> /dev/null; then
-        keys_count=$(wasmd keys list --keyring-backend os 2>/dev/null | wc -l)
+        KEYRING_BACKEND=$(detect_keyring_backend)
+        echo "   Keyring backend: $KEYRING_BACKEND"
+        
+        keys_count=$(timeout 10s wasmd keys list --keyring-backend "$KEYRING_BACKEND" 2>/dev/null | wc -l)
         if [ "$keys_count" -gt 0 ]; then
             echo "✅ Найдено ключей: $keys_count"
             echo "   Список ключей:"
-            wasmd keys list --keyring-backend os 2>/dev/null | sed 's/^/     /'
+            timeout 10s wasmd keys list --keyring-backend "$KEYRING_BACKEND" 2>/dev/null | sed 's/^/     /' || echo "     Не удалось получить список"
         else
             echo "❌ Ключи не найдены! Выполните пункт 7 (Создать ключ валидатора)"
+            echo "   Попробуйте разные keyring-backend:"
+            echo "   - wasmd keys list --keyring-backend os"
+            echo "   - wasmd keys list --keyring-backend test"
         fi
     fi
     
