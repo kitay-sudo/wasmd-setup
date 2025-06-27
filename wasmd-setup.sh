@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Принудительно используем test keyring-backend для избежания зависаний
+# Можно изменить на "os" если нужно использовать системный keyring
+export KEYRING_BACKEND=${KEYRING_BACKEND:-"test"}
+
 # Функция для очистки строк от недопустимых символов
 sanitize_input() {
     local input="$1"
@@ -24,19 +28,14 @@ validate_bech32_string() {
 
 # Функция для определения доступного keyring-backend
 detect_keyring_backend() {
-    # Пробуем os backend
-    if timeout 5s wasmd keys list --keyring-backend os >/dev/null 2>&1; then
-        echo "os"
+    # Проверяем переменную окружения
+    if [ ! -z "$KEYRING_BACKEND" ]; then
+        echo "$KEYRING_BACKEND"
         return
     fi
     
-    # Пробуем test backend
-    if timeout 5s wasmd keys list --keyring-backend test >/dev/null 2>&1; then
-        echo "test"
-        return
-    fi
-    
-    # По умолчанию возвращаем test
+    # Всегда используем test backend по умолчанию (самый безопасный и быстрый)
+    # Он не требует системных настроек и почти всегда работает
     echo "test"
 }
 
