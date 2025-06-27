@@ -416,7 +416,59 @@ function configure_wasmd() {
     pause
 }
 
+function quick_add_validator_key() {
+    echo "=========================================================="
+    echo "           БЫСТРОЕ СОЗДАНИЕ КЛЮЧА ВАЛИДАТОРА             "
+    echo "=========================================================="
+    echo ""
+    
+    if [ ! -d "wasmd" ]; then
+        echo "❌ Сначала клонируйте репозиторий (пункт 1)!"
+        echo "Нажмите Enter для возврата в меню..."
+        read
+        return
+    fi
+    
+    cd wasmd
+    
+    read -p "Введите имя для ключа валидатора: " VALIDATOR_WALLET_NAME
+    VALIDATOR_WALLET_NAME_CLEAN=$(sanitize_input "$VALIDATOR_WALLET_NAME")
+    
+    echo ""
+    echo "⚠️ ВАЖНО: Сохраните mnemonic фразу!"
+    echo ""
+    echo "Создание ключа с test keyring-backend..."
+    
+    # Напрямую создаем с test backend
+    wasmd keys add "$VALIDATOR_WALLET_NAME_CLEAN" --keyring-backend test
+    
+    echo ""
+    echo "✅ Ключ создан! Адрес:"
+    wasmd keys show "$VALIDATOR_WALLET_NAME_CLEAN" -a --keyring-backend test 2>/dev/null || echo "Не удалось получить адрес"
+    
+    cd ..
+    echo ""
+    echo "Нажмите Enter для возврата в меню..."
+    read
+}
+
 function add_validator_key() {
+    clear
+    echo "Выберите способ создания ключа:"
+    echo "1. Обычное создание (автоопределение keyring)"
+    echo "2. Быстрое создание (принудительно test keyring)"
+    echo "3. Вернуться в меню"
+    read -p "Ваш выбор: " key_choice
+    
+    case $key_choice in
+        1) create_validator_key_normal ;;
+        2) quick_add_validator_key ;;
+        3) return ;;
+        *) echo "Неверный выбор!"; pause ;;
+    esac
+}
+
+function create_validator_key_normal() {
     if [ ! -d "wasmd" ]; then
         echo "Сначала клонируйте репозиторий!"
         pause
@@ -441,22 +493,32 @@ function add_validator_key() {
     echo "Без неё вы не сможете восстановить кошелек!"
     echo ""
     
-    # Пытаемся создать ключ с разными keyring-backend
-    if wasmd keys add "$VALIDATOR_WALLET_NAME_CLEAN" --keyring-backend os 2>/dev/null; then
-        echo "✅ Ключ валидатора '$VALIDATOR_WALLET_NAME_CLEAN' успешно создан с keyring-backend os!"
-    elif wasmd keys add "$VALIDATOR_WALLET_NAME_CLEAN" --keyring-backend test 2>/dev/null; then
-        echo "✅ Ключ валидатора '$VALIDATOR_WALLET_NAME_CLEAN' успешно создан с keyring-backend test!"
-        echo "⚠️ Использован test keyring - подходит для тестирования"
+    # Определяем keyring-backend
+    KEYRING_BACKEND=$(detect_keyring_backend)
+    echo "Используется keyring-backend: $KEYRING_BACKEND"
+    echo ""
+    
+    # Создаем ключ с определенным keyring-backend
+    echo "Создание ключа..."
+    if wasmd keys add "$VALIDATOR_WALLET_NAME_CLEAN" --keyring-backend "$KEYRING_BACKEND"; then
+        echo ""
+        echo "✅ Ключ валидатора '$VALIDATOR_WALLET_NAME_CLEAN' успешно создан!"
+        
+        # Показываем адрес
+        echo ""
+        echo "📍 Адрес валидатора:"
+        timeout 10s wasmd keys show "$VALIDATOR_WALLET_NAME_CLEAN" -a --keyring-backend "$KEYRING_BACKEND" 2>/dev/null || echo "Не удалось получить адрес"
+        
+        echo ""
+        echo "📋 Список всех ключей:"
+        timeout 10s wasmd keys list --keyring-backend "$KEYRING_BACKEND" 2>/dev/null || echo "Не удалось получить список ключей"
+        
     else
+        echo ""
         echo "❌ Ошибка при создании ключа валидатора!"
         echo "Попробуйте создать ключ вручную:"
-        echo "wasmd keys add $VALIDATOR_WALLET_NAME_CLEAN --keyring-backend test"
+        echo "wasmd keys add $VALIDATOR_WALLET_NAME_CLEAN --keyring-backend $KEYRING_BACKEND"
     fi
-    
-    echo ""
-    echo "📋 Проверка созданного ключа:"
-    echo "Список всех ключей:"
-    wasmd keys list --keyring-backend os 2>/dev/null || wasmd keys list --keyring-backend test 2>/dev/null || echo "Не удалось получить список ключей"
     
     cd ..
     echo ""
@@ -1017,15 +1079,36 @@ function start_wasmd_node() {
 }
 
 function set_bech32_prefix() {
+    echo "=========================================================="
+    echo "               НАСТРОЙКА BECH32 ПРЕФИКСА                 "
+    echo "=========================================================="
+    echo ""
+    
     if [ ! -f "wasmd/Makefile" ]; then
-        echo "Makefile не найден в папке wasmd!"
-        read -p 'Нажмите Enter, чтобы вернуться в меню...'
+        echo "❌ Makefile не найден в папке wasmd!"
+        echo "Сначала клонируйте репозиторий (пункт 1)!"
+        echo ""
+        echo "Нажмите Enter для возврата в меню..."
+        read
         return
     fi
-    read -p "Введите желаемый Bech32-префикс (например, myprefix): " new_prefix_raw
+    
+    # Показываем текущий префикс
+    echo "🔍 Проверка текущего префикса в Makefile..."
+    current_prefix=$(grep -o "Bech32Prefix=[a-zA-Z0-9]*" wasmd/Makefile | cut -d= -f2 | head -1)
+    if [ ! -z "$current_prefix" ]; then
+        echo "Текущий префикс: $current_prefix"
+    else
+        echo "Префикс не установлен (используется дефолтный 'wasm')"
+        current_prefix="wasm"
+    fi
+    echo ""
+    
+    read -p "Введите желаемый Bech32-префикс (например, fzp): " new_prefix_raw
     if [ -z "$new_prefix_raw" ]; then
-        echo "Префикс не может быть пустым!"
-        read -p 'Нажмите Enter, чтобы вернуться в меню...'
+        echo "❌ Префикс не может быть пустым!"
+        echo "Нажмите Enter для возврата в меню..."
+        read
         return
     fi
     
@@ -1034,26 +1117,56 @@ function set_bech32_prefix() {
     
     # Ещё раз проверяем, что после очистки префикс не пустой
     if [ -z "$new_prefix" ]; then
-        echo "Префикс после очистки от недопустимых символов стал пустым!"
-        read -p 'Нажмите Enter, чтобы вернуться в меню...'
+        echo "❌ Префикс после очистки от недопустимых символов стал пустым!"
+        echo "Нажмите Enter для возврата в меню..."
+        read
         return
     fi
     
     # Проверяем, что префикс содержит только допустимые символы (a-z, 0-9)
     if ! [[ "$new_prefix" =~ ^[a-z0-9]+$ ]]; then
         echo "❌ Ошибка: Префикс должен содержать только буквы в нижнем регистре (a-z) и цифры (0-9)!"
-        read -p 'Нажмите Enter, чтобы вернуться в меню...'
+        echo "Нажмите Enter для возврата в меню..."
+        read
         return
     fi
     
-    # Замена строки с Bech32Prefix в Makefile (используем # как разделитель)
-    sed -i "s#-X github.com/CosmWasm/wasmd/app.Bech32Prefix=[^ ]* #-X github.com/CosmWasm/wasmd/app.Bech32Prefix=${new_prefix} #" wasmd/Makefile
-    if [ $? -eq 0 ]; then
+    echo ""
+    echo "🔄 Установка префикса '$new_prefix' в Makefile..."
+    
+    # Создаем резервную копию Makefile
+    cp wasmd/Makefile wasmd/Makefile.backup
+    
+    # Ищем и заменяем строку с Bech32Prefix
+    if grep -q "Bech32Prefix=" wasmd/Makefile; then
+        # Если строка уже есть - заменяем
+        sed -i "s/Bech32Prefix=[a-zA-Z0-9]*/Bech32Prefix=${new_prefix}/g" wasmd/Makefile
+    else
+        # Если строки нет - добавляем к ldflags
+        sed -i "s/-ldflags/-ldflags '-X github.com\/CosmWasm\/wasmd\/app.Bech32Prefix=${new_prefix}'/g" wasmd/Makefile
+    fi
+    
+    # Проверяем результат
+    if grep -q "Bech32Prefix=${new_prefix}" wasmd/Makefile; then
         echo "✅ Bech32-префикс успешно изменён на '${new_prefix}'!"
+        echo ""
+        echo "⚠️ ВАЖНО: Необходимо пересобрать wasmd для применения изменений!"
+        echo "Выполните пункт 4 (Собрать и установить wasmd)"
+        echo ""
+        
+        # Сохраняем префикс в переменную окружения
+        export BECH32_PREFIX="$new_prefix"
+        echo "export BECH32_PREFIX=$new_prefix" >> ~/.bashrc
+        
     else
         echo "❌ Ошибка при изменении префикса!"
+        echo "Восстанавливаем резервную копию..."
+        cp wasmd/Makefile.backup wasmd/Makefile
     fi
-    read -p 'Нажмите Enter, чтобы вернуться в меню...'
+    
+    echo ""
+    echo "Нажмите Enter для возврата в меню..."
+    read
 }
 
 function show_node_id() {
@@ -1596,8 +1709,48 @@ function diagnose_node() {
     fi
     
     echo ""
-    echo "6. Рекомендации по исправлению:"
+    echo ""
+    echo "6. Проверка Bech32 префиксов..."
+    
+    # Проверяем соответствие префиксов
+    if [ -f "$GENESIS_JSON" ] && command -v jq &> /dev/null; then
+        # Получаем префикс из genesis.json
+        genesis_address=$(jq -r '.. | strings | select(test("^[a-z]+1[a-z0-9]{38}$"))' "$GENESIS_JSON" 2>/dev/null | head -1)
+        if [ ! -z "$genesis_address" ]; then
+            genesis_prefix=$(echo "$genesis_address" | cut -d1 -f1)
+            echo "   Префикс в genesis.json: $genesis_prefix"
+            
+            # Получаем префикс wasmd
+            if command -v wasmd &> /dev/null; then
+                test_key="test_prefix_check"
+                if wasmd keys add "$test_key" --keyring-backend test --output json 2>/dev/null | grep -q '"address"'; then
+                    wasmd_prefix=$(wasmd keys show "$test_key" -a --keyring-backend test 2>/dev/null | cut -d1 -f1)
+                    wasmd keys delete "$test_key" --keyring-backend test -y 2>/dev/null
+                    echo "   Префикс wasmd: $wasmd_prefix"
+                    
+                    if [ "$genesis_prefix" != "$wasmd_prefix" ]; then
+                        echo "   ❌ ПРОБЛЕМА: Несоответствие префиксов!"
+                        echo "   Решение: используйте пункт 26 (Исправить ошибку Bech32 префикса)"
+                    else
+                        echo "   ✅ Префиксы совпадают"
+                    fi
+                else
+                    echo "   ⚠️ Не удалось проверить префикс wasmd"
+                fi
+            else
+                echo "   ❌ wasmd не установлен"
+            fi
+        else
+            echo "   ⚠️ Адреса в genesis.json не найдены"
+        fi
+    else
+        echo "   ⚠️ Проверка недоступна (нет genesis.json или jq)"
+    fi
+    
+    echo ""
+    echo "7. Рекомендации по исправлению:"
     echo "   - Если нет валидаторов в genesis: выполните пункты 7→9→10"
+    echo "   - Если ошибка Bech32 префикса: используйте пункт 26"
     echo "   - Если ошибка при старте: проверьте логи (пункт 20)"
     echo "   - Если проблемы с файлами: используйте пункт 24 (Исправить файлы)"
     echo "   - Для полной очистки: используйте пункт 25 (Очистить конфигурацию)"
@@ -1777,6 +1930,150 @@ function clean_wasmd_config() {
     read
 }
 
+function fix_bech32_prefix_error() {
+    echo "=========================================================="
+    echo "           ИСПРАВЛЕНИЕ ОШИБКИ BECH32 ПРЕФИКСА           "
+    echo "=========================================================="
+    echo ""
+    
+    echo "🔍 Диагностика проблемы с Bech32 префиксом..."
+    
+    # Проверяем genesis.json
+    GENESIS_JSON="/root/.wasmd/config/genesis.json"
+    if [ ! -f "$GENESIS_JSON" ]; then
+        echo "❌ Genesis.json не найден!"
+        echo "Нажмите Enter для возврата в меню..."
+        read
+        return
+    fi
+    
+    # Проверяем какие префиксы используются в genesis.json
+    echo "Анализ адресов в genesis.json..."
+    if command -v jq &> /dev/null; then
+        # Ищем все адреса в genesis.json
+        addresses=$(jq -r '.. | strings | select(test("^[a-z]+1[a-z0-9]{38}$"))' "$GENESIS_JSON" 2>/dev/null | head -5)
+        if [ ! -z "$addresses" ]; then
+            echo "Найденные адреса:"
+            echo "$addresses" | sed 's/^/   /'
+            
+            # Определяем префикс
+            first_address=$(echo "$addresses" | head -1)
+            used_prefix=$(echo "$first_address" | cut -d1 -f1)
+            echo ""
+            echo "Используемый префикс в genesis.json: $used_prefix"
+        else
+            echo "⚠️ Адреса в genesis.json не найдены"
+            used_prefix="unknown"
+        fi
+    else
+        echo "⚠️ jq не установлен, ручная диагностика..."
+        used_prefix="unknown"
+    fi
+    
+    # Проверяем какой префикс ожидает wasmd
+    echo ""
+    echo "Проверка префикса в wasmd..."
+    
+    # Попробуем создать тестовый ключ чтобы узнать префикс
+    test_key="test_key_$(date +%s)"
+    cd wasmd 2>/dev/null || cd .
+    
+    if wasmd keys add "$test_key" --keyring-backend test --output json 2>/dev/null | grep -q '"address"'; then
+        expected_prefix=$(wasmd keys show "$test_key" -a --keyring-backend test 2>/dev/null | cut -d1 -f1)
+        wasmd keys delete "$test_key" --keyring-backend test -y 2>/dev/null
+        echo "Ожидаемый префикс wasmd: $expected_prefix"
+    else
+        echo "⚠️ Не удалось определить префикс wasmd"
+        expected_prefix="wasm"
+    fi
+    
+    cd - > /dev/null 2>&1
+    
+    echo ""
+    echo "📋 ДИАГНОСТИКА:"
+    echo "   Genesis.json использует: $used_prefix"
+    echo "   Wasmd ожидает: $expected_prefix"
+    
+    if [ "$used_prefix" != "$expected_prefix" ]; then
+        echo ""
+        echo "❌ НАЙДЕНО НЕСООТВЕТСТВИЕ ПРЕФИКСОВ!"
+        echo ""
+        echo "🔧 Варианты решения:"
+        echo "1. Пересобрать wasmd с префиксом '$used_prefix'"
+        echo "2. Полная переинициализация с префиксом '$expected_prefix'"
+        echo "3. Вернуться в меню"
+        echo ""
+        read -p "Ваш выбор (1-3): " fix_choice
+        
+        case $fix_choice in
+            1)
+                echo ""
+                echo "🔄 Пересборка wasmd с префиксом '$used_prefix'..."
+                
+                # Устанавливаем префикс в Makefile
+                if [ -f "wasmd/Makefile" ]; then
+                    cp wasmd/Makefile wasmd/Makefile.backup
+                    
+                    if grep -q "Bech32Prefix=" wasmd/Makefile; then
+                        sed -i "s/Bech32Prefix=[a-zA-Z0-9]*/Bech32Prefix=${used_prefix}/g" wasmd/Makefile
+                    else
+                        sed -i "s/-ldflags/-ldflags '-X github.com\/CosmWasm\/wasmd\/app.Bech32Prefix=${used_prefix}'/g" wasmd/Makefile
+                    fi
+                    
+                    echo "Префикс установлен в Makefile. Запускаем сборку..."
+                    
+                    cd wasmd
+                    if make install; then
+                        echo ""
+                        echo "✅ Wasmd успешно пересобран с префиксом '$used_prefix'!"
+                        echo "Теперь можно запускать ноду (пункт 12)"
+                    else
+                        echo ""
+                        echo "❌ Ошибка при сборке wasmd!"
+                        echo "Восстанавливаем Makefile..."
+                        cp Makefile.backup Makefile
+                    fi
+                    cd ..
+                else
+                    echo "❌ Makefile не найден!"
+                fi
+                ;;
+            2)
+                echo ""
+                echo "🔄 Полная переинициализация..."
+                echo "Будет выполнена очистка конфигурации и создание новой с правильным префиксом."
+                echo ""
+                read -p "Продолжить? (yes/no): " confirm_reinit
+                if [[ "$confirm_reinit" == "yes" ]]; then
+                    # Очищаем конфигурацию
+                    rm -rf ~/.wasmd 2>/dev/null
+                    echo "✅ Конфигурация очищена"
+                    echo ""
+                    echo "💡 Теперь выполните по порядку:"
+                    echo "   3. Установить Bech32-префикс ($expected_prefix)"
+                    echo "   4. Собрать и установить wasmd"
+                    echo "   5-6. Инициализировать и настроить"
+                    echo "   7-9-10. Создать валидатора"
+                fi
+                ;;
+            3)
+                echo "Операция отменена"
+                ;;
+            *)
+                echo "Неверный выбор"
+                ;;
+        esac
+    else
+        echo ""
+        echo "✅ Префиксы совпадают! Проблема не в префиксе."
+        echo "Возможно проблема в другом. Проверьте логи (пункт 20)"
+    fi
+    
+    echo ""
+    echo "Нажмите Enter для возврата в меню..."
+    read
+}
+
 function quick_clean_wasmd() {
     echo "=========================================================="
     echo "              БЫСТРАЯ ОЧИСТКА WASMD (упрощенная)        "
@@ -1917,6 +2214,7 @@ while true; do
     echo "23. Тестовый запуск"
     echo "24. Исправить файлы конфигурации"
     echo "25. Очистить конфигурацию wasmd (выбор способа)"
+    echo "26. Исправить ошибку Bech32 префикса"
     echo ""
     echo "0.  Выйти"
     echo "=========================================================="
@@ -1962,6 +2260,7 @@ while true; do
                 *) echo "Неверный выбор!"; pause ;;
             esac
             ;;
+        26) fix_bech32_prefix_error ;;
         0) echo "Выход."; exit 0 ;;
         *) echo "Неверный выбор!"; pause ;;
     esac
