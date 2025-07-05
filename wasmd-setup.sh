@@ -137,46 +137,75 @@ if [ -z "$GENTX_AMOUNT" ]; then read -p "Введите GENTX_AMOUNT: " GENTX_AM
 
 # Функция для определения минимальной суммы для валидатора
 get_min_validator_stake() {
+    # Безопасная большая сумма по умолчанию (1 триллион)
+    local safe_default="1000000000000"
+    
     # Пытаемся определить DefaultPowerReduction разными способами
     
-    # Способ 1: Из genesis.json (если есть параметр)
+    # Способ 1: Из сохраненного файла (обновляется при ошибках)
+    if [ -f ~/.wasmd_min_stake ]; then
+        local saved_value=$(cat ~/.wasmd_min_stake 2>/dev/null)
+        if [[ "$saved_value" =~ ^[0-9]+$ ]] && [ "$saved_value" -gt 0 ]; then
+            echo "$saved_value"
+            return
+        fi
+    fi
+    
+    # Способ 2: Из genesis.json (если есть параметр)
     if [ -f ~/.wasmd/config/genesis.json ] && command -v jq &> /dev/null; then
         power_reduction=$(jq -r '.app_state.staking.params.power_reduction // empty' ~/.wasmd/config/genesis.json 2>/dev/null)
-        if [ ! -z "$power_reduction" ] && [ "$power_reduction" != "null" ]; then
+        if [ ! -z "$power_reduction" ] && [ "$power_reduction" != "null" ] && [[ "$power_reduction" =~ ^[0-9]+$ ]]; then
             echo "$power_reduction"
             return
         fi
     fi
     
-    # Способ 2: Из логов ошибки (если wasmd уже запускался)
-    if [ -f ~/.wasmd/wasmd.log ]; then
-        power_reduction=$(grep -o "DefaultPowerReduction ({[0-9]*})" ~/.wasmd/wasmd.log 2>/dev/null | tail -1 | grep -o "[0-9]*")
-        if [ ! -z "$power_reduction" ]; then
+    # Способ 3: Из логов wasmd (если есть)
+    if [ -f ~/.wasmd/logs/wasmd.log ]; then
+        power_reduction=$(grep -o "DefaultPowerReduction ({[0-9]*})" ~/.wasmd/logs/wasmd.log 2>/dev/null | tail -1 | grep -o "[0-9]*")
+        if [[ "$power_reduction" =~ ^[0-9]+$ ]] && [ "$power_reduction" -gt 0 ]; then
             echo "$power_reduction"
             return
         fi
     fi
     
-    # Способ 3: Попробуем запустить wasmd с --help или версией чтобы определить
-    if command -v wasmd &> /dev/null; then
-        # Попытка запуска с неправильными параметрами для получения ошибки
-        power_reduction=$(timeout 10s wasmd start --dry-run 2>&1 | grep -o "DefaultPowerReduction ({[0-9]*})" | grep -o "[0-9]*" | tail -1)
-        if [ ! -z "$power_reduction" ]; then
+    # Способ 4: Поиск в системных логах
+    if command -v journalctl &> /dev/null; then
+        power_reduction=$(journalctl -u wasmd --no-pager -n 100 2>/dev/null | grep -o "DefaultPowerReduction ({[0-9]*})" | tail -1 | grep -o "[0-9]*")
+        if [[ "$power_reduction" =~ ^[0-9]+$ ]] && [ "$power_reduction" -gt 0 ]; then
             echo "$power_reduction"
             return
         fi
     fi
     
-    # Способ 4: Значения по умолчанию для разных версий (fallback)
-    # В порядке убывания вероятности
-    local common_values=(
-        "824639059680"  # Текущее значение пользователя
-        "824645929728"  # Предыдущее значение  
-        "824647080320"  # Исходное значение
-        "1000000000000" # Безопасное большое значение
-    )
+    # Способ 5: Безопасное значение по умолчанию
+    echo "$safe_default"
+}
+
+# Функция для предложения безопасной суммы
+suggest_safe_amount() {
+    local min_required="$1"
+    local safe_multiplier=10  # В 10 раз больше минимума
     
-    echo "${common_values[0]}"
+    if [[ "$min_required" =~ ^[0-9]+$ ]] && [ "$min_required" -gt 0 ]; then
+        local safe_amount=$((min_required * safe_multiplier))
+        echo "$safe_amount"
+    else
+        echo "10000000000000"  # 10 триллионов как резерв
+    fi
+}
+
+# Функция для извлечения минимальной суммы из текста ошибки
+extract_min_from_error() {
+    local error_text="$1"
+    if [ ! -z "$error_text" ]; then
+        local extracted=$(echo "$error_text" | grep -o "DefaultPowerReduction ({[0-9]*})" | grep -o "[0-9]*" | tail -1)
+        if [[ "$extracted" =~ ^[0-9]+$ ]] && [ "$extracted" -gt 0 ]; then
+            echo "$extracted"
+            return 0
+        fi
+    fi
+    return 1
 }
 
 # Функция для обновления минимальной суммы в runtime
@@ -650,12 +679,75 @@ function add_genesis_account() {
         return
     fi
     cd wasmd
-    read -p "Введите имя кошелька для добавления в генезис: " WALLET_NAME
-    read -p "Введите количество монет для добавления: " AMOUNT
     
-    # Очищаем введенные данные от недопустимых символов
-    WALLET_NAME_CLEAN=$(sanitize_input "$WALLET_NAME")
-    AMOUNT_CLEAN=$(sanitize_input "$AMOUNT")
+    echo "=========================================================="
+    echo "               ДОБАВЛЕНИЕ АККАУНТА В GENESIS             "
+    echo "=========================================================="
+    echo ""
+    
+    read -p "Введите имя кошелька для добавления в генезис: " WALLET_NAME
+    
+    # Определяем минимальные суммы
+    MIN_VALIDATOR_STAKE=$(get_min_validator_stake)
+    SAFE_AMOUNT=$(suggest_safe_amount "$MIN_VALIDATOR_STAKE")
+    
+    echo ""
+    echo "💰 Рекомендуемые суммы для добавления:"
+    echo "   - Минимум для валидатора: $MIN_VALIDATOR_STAKE"
+    echo "   - Безопасная сумма: $SAFE_AMOUNT (рекомендуется)"
+    echo "   - Максимальная безопасная: 10000000000000"
+    echo ""
+    echo "💡 Выберите сумму для добавления:"
+    echo "   1. Безопасная сумма: $SAFE_AMOUNT (рекомендуется)"
+    echo "   2. Максимальная: 10000000000000"
+    echo "   3. Ввести свою сумму"
+    echo ""
+    
+    while true; do
+        read -p "Выберите вариант (1-3): " amount_choice
+        
+        case $amount_choice in
+            1)
+                AMOUNT="$SAFE_AMOUNT"
+                echo "✅ Выбрана безопасная сумма: $AMOUNT"
+                break
+                ;;
+            2)
+                AMOUNT="10000000000000"
+                echo "✅ Выбрана максимальная сумма: $AMOUNT"
+                break
+                ;;
+            3)
+                echo ""
+                read -p "Введите количество монет (минимум $MIN_VALIDATOR_STAKE): " custom_amount
+                custom_amount=$(echo "$custom_amount" | tr -d '\r\n')
+                if [[ "$custom_amount" =~ ^[0-9]+$ ]]; then
+                    if (( custom_amount < MIN_VALIDATOR_STAKE )); then
+                        echo "⚠️ Сумма меньше минимума для валидатора!"
+                        echo "Рекомендуется использовать минимум $MIN_VALIDATOR_STAKE"
+                        read -p "Все равно продолжить с $custom_amount? (y/n): " confirm
+                        if [[ "$confirm" =~ ^[yYдД]$ ]]; then
+                            AMOUNT="$custom_amount"
+                            break
+                        else
+                            continue
+                        fi
+                    else
+                        AMOUNT="$custom_amount"
+                        echo "✅ Принята сумма: $AMOUNT"
+                        break
+                    fi
+                else
+                    echo "❌ Введите только цифры!"
+                    continue
+                fi
+                ;;
+            *)
+                echo "❌ Неверный выбор! Введите 1, 2 или 3"
+                continue
+                ;;
+        esac
+    done
     
     # Очищаем переменную STAKE от символов переноса строки и недопустимых символов
     STAKE_CLEAN=$(sanitize_input "$STAKE")
@@ -665,12 +757,12 @@ function add_genesis_account() {
     echo "Используется keyring-backend: $KEYRING_BACKEND"
     
     # Получаем очищенный адрес
-    echo "Получение адреса кошелька '$WALLET_NAME_CLEAN'..."
-    WALLET_ADDR=$(timeout 10s wasmd keys show "$WALLET_NAME_CLEAN" -a --keyring-backend "$KEYRING_BACKEND" 2>/dev/null | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')
+    echo "Получение адреса кошелька '$WALLET_NAME'..."
+    WALLET_ADDR=$(timeout 10s wasmd keys show "$WALLET_NAME" -a --keyring-backend "$KEYRING_BACKEND" 2>/dev/null | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')
     
     # Проверяем, что получили допустимый адрес
     if [ -z "$WALLET_ADDR" ]; then
-        echo "❌ Ошибка: Не удалось получить адрес для кошелька '$WALLET_NAME_CLEAN'!"
+        echo "❌ Ошибка: Не удалось получить адрес для кошелька '$WALLET_NAME'!"
         echo ""
         echo "Возможные причины:"
         echo "1. Кошелек не существует"
@@ -686,13 +778,13 @@ function add_genesis_account() {
     echo "Получен адрес: $WALLET_ADDR"
     
     # Формируем сумму с очищенной деноминацией
-    AMOUNT_WITH_DENOM="${AMOUNT_CLEAN}${STAKE_CLEAN}"
+    AMOUNT_WITH_DENOM="${AMOUNT}${STAKE_CLEAN}"
     
     echo "Выполняем: wasmd genesis add-genesis-account $WALLET_ADDR ${AMOUNT_WITH_DENOM}"
     
     # Выполняем команду с детальной диагностикой
     if wasmd genesis add-genesis-account "$WALLET_ADDR" "${AMOUNT_WITH_DENOM}"; then
-        echo "✅ Генезис-аккаунт для '$WALLET_NAME_CLEAN' успешно добавлен с ${AMOUNT_WITH_DENOM}!"
+        echo "✅ Генезис-аккаунт для '$WALLET_NAME' успешно добавлен с ${AMOUNT_WITH_DENOM}!"
         
         # Проверяем, что аккаунт действительно добавлен в genesis.json
         if command -v jq &> /dev/null; then
@@ -816,48 +908,105 @@ function create_validator_from_json() {
     # Получаем текущую минимальную сумму для валидатора
     echo "🔍 Определение минимальной суммы для валидатора..."
     MIN_VALIDATOR_STAKE=$(get_min_validator_stake)
+    SAFE_AMOUNT=$(suggest_safe_amount "$MIN_VALIDATOR_STAKE")
+    
     echo "📊 Минимальная сумма для валидатора: $MIN_VALIDATOR_STAKE $coin_prefix"
+    echo "🛡️ Рекомендуемая безопасная сумма: $SAFE_AMOUNT $coin_prefix"
     echo ""
-
-    # Запрос суммы для стейкинга
-    while true; do
-        read -p "Введите сумму для стейка валидатора (в $coin_prefix, минимум $MIN_VALIDATOR_STAKE, например 1000000000000): " input_amount_token
-        input_amount_token=$(echo "$input_amount_token" | tr -d '\r\n')
-        if [[ "$input_amount_token" =~ ^[0-9]+$ ]]; then
-            # Проверяем минимальную сумму для активации валидатора (DefaultPowerReduction)
-            if (( input_amount_token < MIN_VALIDATOR_STAKE )); then
-                echo "❌ Предупреждение: Введено меньше минимальной суммы для стейкинга ($MIN_VALIDATOR_STAKE $coin_prefix)."
-                echo "💡 Пожалуйста, введите сумму не менее $MIN_VALIDATOR_STAKE $coin_prefix."
-                continue
+    
+    # Предлагаем пользователю обновить минимальную сумму если есть новая ошибка
+    echo "❓ Если вы получили ошибку 'validator set is empty' с новым значением DefaultPowerReduction:"
+    read -p "Хотите ввести текст ошибки для автоматического определения суммы? (y/n): " update_from_error
+    
+    if [[ "$update_from_error" =~ ^[yYдД]$ ]]; then
+        echo ""
+        echo "📋 Вставьте полный текст ошибки (нажмите Enter два раза для завершения):"
+        error_text=""
+        while IFS= read -r line; do
+            [ -z "$line" ] && break
+            error_text+="$line "
+        done
+        
+        if [ ! -z "$error_text" ]; then
+            if extracted_min=$(extract_min_from_error "$error_text"); then
+                echo "✅ Извлечено новое минимальное значение: $extracted_min"
+                echo "$extracted_min" > ~/.wasmd_min_stake
+                MIN_VALIDATOR_STAKE="$extracted_min"
+                SAFE_AMOUNT=$(suggest_safe_amount "$MIN_VALIDATOR_STAKE")
+                echo "📊 Обновленная минимальная сумма: $MIN_VALIDATOR_STAKE $coin_prefix"
+                echo "🛡️ Новая рекомендуемая сумма: $SAFE_AMOUNT $coin_prefix"
+            else
+                echo "⚠️ Не удалось извлечь значение из ошибки. Используем текущие настройки."
             fi
-            break
-        else
-            echo "❌ Предупреждение: Введено некорректное значение суммы."
-            echo "💡 Пожалуйста, введите только цифры (например, 1000000000000)."
         fi
+        echo ""
+    fi
+
+    # Запрос суммы для стейкинга с умными предложениями
+    while true; do
+        echo "💰 Варианты сумм для стейкинга:"
+        echo "   1. Минимальная: $MIN_VALIDATOR_STAKE $coin_prefix"
+        echo "   2. Безопасная: $SAFE_AMOUNT $coin_prefix (рекомендуется)"
+        echo "   3. Ввести свою сумму"
+        echo ""
+        read -p "Выберите вариант (1-3): " amount_choice
+        
+        case $amount_choice in
+            1)
+                input_amount_token="$MIN_VALIDATOR_STAKE"
+                echo "✅ Выбрана минимальная сумма: $input_amount_token $coin_prefix"
+                break
+                ;;
+            2)
+                input_amount_token="$SAFE_AMOUNT"
+                echo "✅ Выбрана безопасная сумма: $input_amount_token $coin_prefix"
+                break
+                ;;
+            3)
+                echo ""
+                read -p "Введите сумму для стейка валидатора (минимум $MIN_VALIDATOR_STAKE): " custom_amount
+                custom_amount=$(echo "$custom_amount" | tr -d '\r\n')
+                if [[ "$custom_amount" =~ ^[0-9]+$ ]]; then
+                    if (( custom_amount < MIN_VALIDATOR_STAKE )); then
+                        echo "❌ Сумма ($custom_amount) меньше минимума ($MIN_VALIDATOR_STAKE)!"
+                        echo "💡 Используйте минимум $MIN_VALIDATOR_STAKE или больше"
+                        continue
+                    fi
+                    input_amount_token="$custom_amount"
+                    echo "✅ Принята сумма: $input_amount_token $coin_prefix"
+                    break
+                else
+                    echo "❌ Введите только цифры!"
+                    continue
+                fi
+                ;;
+            *)
+                echo "❌ Неверный выбор! Введите 1, 2 или 3"
+                continue
+                ;;
+        esac
     done
     
-    # Запрос минимального self-delegation
-    while true; do
-        read -p "Введите минимальную сумму самоделегирования (в $coin_prefix, минимум $MIN_VALIDATOR_STAKE, по умолчанию $MIN_VALIDATOR_STAKE): " min_self_delegation
-        min_self_delegation=${min_self_delegation:-$MIN_VALIDATOR_STAKE}
-        min_self_delegation=$(echo "$min_self_delegation" | tr -d '\r\n')
-        if [[ "$min_self_delegation" =~ ^[0-9]+$ ]]; then
-            if (( min_self_delegation < MIN_VALIDATOR_STAKE )); then
-                echo "⚠️ Предупреждение: Введено меньше минимальной суммы для активации ($MIN_VALIDATOR_STAKE $coin_prefix). Используем $MIN_VALIDATOR_STAKE."
-                min_self_delegation=$MIN_VALIDATOR_STAKE
-            fi
-            if (( min_self_delegation > input_amount_token )); then
-                echo "⚠️ Предупреждение: Минимальная сумма самоделегирования не может быть больше суммы стейка. Используем $input_amount_token."
-                min_self_delegation=$input_amount_token
-            fi
-            break
-        else
-            echo "⚠️ Предупреждение: Введено некорректное значение минимальной суммы. Используем $MIN_VALIDATOR_STAKE."
+    # Запрос минимального self-delegation (упрощенный)
+    echo ""
+    echo "💡 Для минимального самоделегирования рекомендуется использовать ту же сумму"
+    read -p "Минимальная сумма самоделегирования (Enter = $input_amount_token): " min_self_delegation
+    min_self_delegation=${min_self_delegation:-$input_amount_token}
+    min_self_delegation=$(echo "$min_self_delegation" | tr -d '\r\n')
+    
+    if [[ "$min_self_delegation" =~ ^[0-9]+$ ]]; then
+        if (( min_self_delegation < MIN_VALIDATOR_STAKE )); then
+            echo "⚠️ Используем минимум: $MIN_VALIDATOR_STAKE"
             min_self_delegation=$MIN_VALIDATOR_STAKE
-            break
         fi
-    done
+        if (( min_self_delegation > input_amount_token )); then
+            echo "⚠️ Самоделегирование не может быть больше стейка. Используем: $input_amount_token"
+            min_self_delegation=$input_amount_token
+        fi
+    else
+        echo "⚠️ Используем значение по умолчанию: $input_amount_token"
+        min_self_delegation=$input_amount_token
+    fi
     
     # Формируем суммы с деноминацией
     amount="${input_amount}${coin_prefix}"
@@ -1075,48 +1224,105 @@ function create_and_collect_gentx() {
     # Получаем текущую минимальную сумму для валидатора
     echo "🔍 Определение минимальной суммы для валидатора..."
     MIN_VALIDATOR_STAKE=$(get_min_validator_stake)
+    SAFE_AMOUNT=$(suggest_safe_amount "$MIN_VALIDATOR_STAKE")
+    
     echo "📊 Минимальная сумма для валидатора: $MIN_VALIDATOR_STAKE $coin_prefix"
+    echo "🛡️ Рекомендуемая безопасная сумма: $SAFE_AMOUNT $coin_prefix"
     echo ""
-
-    # Запрос суммы для стейкинга
-    while true; do
-        read -p "Введите сумму для стейка валидатора (в $coin_prefix, минимум $MIN_VALIDATOR_STAKE, например 1000000000000): " input_amount_token
-        input_amount_token=$(echo "$input_amount_token" | tr -d '\r\n')
-        if [[ "$input_amount_token" =~ ^[0-9]+$ ]]; then
-            # Проверяем минимальную сумму для активации валидатора (DefaultPowerReduction)
-            if (( input_amount_token < MIN_VALIDATOR_STAKE )); then
-                echo "❌ Предупреждение: Введено меньше минимальной суммы для стейкинга ($MIN_VALIDATOR_STAKE $coin_prefix)."
-                echo "💡 Пожалуйста, введите сумму не менее $MIN_VALIDATOR_STAKE $coin_prefix."
-                continue
+    
+    # Предлагаем пользователю обновить минимальную сумму если есть новая ошибка
+    echo "❓ Если вы получили ошибку 'validator set is empty' с новым значением DefaultPowerReduction:"
+    read -p "Хотите ввести текст ошибки для автоматического определения суммы? (y/n): " update_from_error
+    
+    if [[ "$update_from_error" =~ ^[yYдД]$ ]]; then
+        echo ""
+        echo "📋 Вставьте полный текст ошибки (нажмите Enter два раза для завершения):"
+        error_text=""
+        while IFS= read -r line; do
+            [ -z "$line" ] && break
+            error_text+="$line "
+        done
+        
+        if [ ! -z "$error_text" ]; then
+            if extracted_min=$(extract_min_from_error "$error_text"); then
+                echo "✅ Извлечено новое минимальное значение: $extracted_min"
+                echo "$extracted_min" > ~/.wasmd_min_stake
+                MIN_VALIDATOR_STAKE="$extracted_min"
+                SAFE_AMOUNT=$(suggest_safe_amount "$MIN_VALIDATOR_STAKE")
+                echo "📊 Обновленная минимальная сумма: $MIN_VALIDATOR_STAKE $coin_prefix"
+                echo "🛡️ Новая рекомендуемая сумма: $SAFE_AMOUNT $coin_prefix"
+            else
+                echo "⚠️ Не удалось извлечь значение из ошибки. Используем текущие настройки."
             fi
-            break
-        else
-            echo "❌ Предупреждение: Введено некорректное значение суммы."
-            echo "💡 Пожалуйста, введите только цифры (например, 1000000000000)."
         fi
+        echo ""
+    fi
+
+    # Запрос суммы для стейкинга с умными предложениями
+    while true; do
+        echo "💰 Варианты сумм для стейкинга:"
+        echo "   1. Минимальная: $MIN_VALIDATOR_STAKE $coin_prefix"
+        echo "   2. Безопасная: $SAFE_AMOUNT $coin_prefix (рекомендуется)"
+        echo "   3. Ввести свою сумму"
+        echo ""
+        read -p "Выберите вариант (1-3): " amount_choice
+        
+        case $amount_choice in
+            1)
+                input_amount_token="$MIN_VALIDATOR_STAKE"
+                echo "✅ Выбрана минимальная сумма: $input_amount_token $coin_prefix"
+                break
+                ;;
+            2)
+                input_amount_token="$SAFE_AMOUNT"
+                echo "✅ Выбрана безопасная сумма: $input_amount_token $coin_prefix"
+                break
+                ;;
+            3)
+                echo ""
+                read -p "Введите сумму для стейка валидатора (минимум $MIN_VALIDATOR_STAKE): " custom_amount
+                custom_amount=$(echo "$custom_amount" | tr -d '\r\n')
+                if [[ "$custom_amount" =~ ^[0-9]+$ ]]; then
+                    if (( custom_amount < MIN_VALIDATOR_STAKE )); then
+                        echo "❌ Сумма ($custom_amount) меньше минимума ($MIN_VALIDATOR_STAKE)!"
+                        echo "💡 Используйте минимум $MIN_VALIDATOR_STAKE или больше"
+                        continue
+                    fi
+                    input_amount_token="$custom_amount"
+                    echo "✅ Принята сумма: $input_amount_token $coin_prefix"
+                    break
+                else
+                    echo "❌ Введите только цифры!"
+                    continue
+                fi
+                ;;
+            *)
+                echo "❌ Неверный выбор! Введите 1, 2 или 3"
+                continue
+                ;;
+        esac
     done
     
-    # Запрос минимального self-delegation
-    while true; do
-        read -p "Введите минимальную сумму самоделегирования (в $coin_prefix, минимум $MIN_VALIDATOR_STAKE, по умолчанию $MIN_VALIDATOR_STAKE): " min_self_delegation
-        min_self_delegation=${min_self_delegation:-$MIN_VALIDATOR_STAKE}
-        min_self_delegation=$(echo "$min_self_delegation" | tr -d '\r\n')
-        if [[ "$min_self_delegation" =~ ^[0-9]+$ ]]; then
-            if (( min_self_delegation < MIN_VALIDATOR_STAKE )); then
-                echo "⚠️ Предупреждение: Введено меньше минимальной суммы для активации ($MIN_VALIDATOR_STAKE $coin_prefix). Используем $MIN_VALIDATOR_STAKE."
-                min_self_delegation=$MIN_VALIDATOR_STAKE
-            fi
-            if (( min_self_delegation > input_amount_token )); then
-                echo "⚠️ Предупреждение: Минимальная сумма самоделегирования не может быть больше суммы стейка. Используем $input_amount_token."
-                min_self_delegation=$input_amount_token
-            fi
-            break
-        else
-            echo "⚠️ Предупреждение: Введено некорректное значение минимальной суммы. Используем $MIN_VALIDATOR_STAKE."
+    # Запрос минимального self-delegation (упрощенный)
+    echo ""
+    echo "💡 Для минимального самоделегирования рекомендуется использовать ту же сумму"
+    read -p "Минимальная сумма самоделегирования (Enter = $input_amount_token): " min_self_delegation
+    min_self_delegation=${min_self_delegation:-$input_amount_token}
+    min_self_delegation=$(echo "$min_self_delegation" | tr -d '\r\n')
+    
+    if [[ "$min_self_delegation" =~ ^[0-9]+$ ]]; then
+        if (( min_self_delegation < MIN_VALIDATOR_STAKE )); then
+            echo "⚠️ Используем минимум: $MIN_VALIDATOR_STAKE"
             min_self_delegation=$MIN_VALIDATOR_STAKE
-            break
         fi
-    done
+        if (( min_self_delegation > input_amount_token )); then
+            echo "⚠️ Самоделегирование не может быть больше стейка. Используем: $input_amount_token"
+            min_self_delegation=$input_amount_token
+        fi
+    else
+        echo "⚠️ Используем значение по умолчанию: $input_amount_token"
+        min_self_delegation=$input_amount_token
+    fi
     
     # Формируем суммы с деноминацией
     amount_with_prefix="${input_amount_token}${coin_prefix}"
@@ -1136,8 +1342,112 @@ function create_and_collect_gentx() {
     echo "  --from \"$wallet_name\" \\"
     echo "  --keyring-backend os"
 
-    # Выполнение команды wasmd genesis gentx
-    wasmd genesis gentx "$wallet_name" "$amount_with_prefix" \
+    # Выполнение команды wasmd genesis gentx с детальной диагностикой
+    echo ""
+    echo "🔧 Создание генезис-транзакции..."
+    echo "Команда: wasmd genesis gentx \"$wallet_name\" \"$amount_with_prefix\" \\"
+    echo "  --chain-id \"$chain_id\" \\"
+    echo "  --moniker \"$moniker\" \\"
+    echo "  --commission-rate \"0.10\" \\"
+    echo "  --commission-max-rate \"0.20\" \\"
+    echo "  --commission-max-change-rate \"0.01\" \\"
+    echo "  --min-self-delegation \"$min_self_delegation\" \\"
+    echo "  --from \"$wallet_name\" \\"
+    echo "  --keyring-backend \"$KEYRING_BACKEND\" \\"
+    echo "  --home \"$HOME/.wasmd\""
+    echo ""
+
+    # Проверяем предварительные условия
+    echo "🔍 Предварительная проверка:"
+    
+    # 1. Проверяем ключ
+    echo "1. Проверка ключа '$wallet_name'..."
+    if timeout 10s wasmd keys show "$wallet_name" --keyring-backend "$KEYRING_BACKEND" > /dev/null 2>&1; then
+        key_address=$(timeout 10s wasmd keys show "$wallet_name" -a --keyring-backend "$KEYRING_BACKEND" 2>/dev/null)
+        echo "   ✅ Ключ найден: $key_address"
+    else
+        echo "   ❌ Ключ '$wallet_name' не найден!"
+        cd ..
+        pause
+        return
+    fi
+    
+    # 2. Проверяем genesis.json
+    echo "2. Проверка genesis.json..."
+    if [ -f ~/.wasmd/config/genesis.json ]; then
+        if jq '.' ~/.wasmd/config/genesis.json >/dev/null 2>&1; then
+            echo "   ✅ Genesis.json валидный"
+        else
+            echo "   ❌ Genesis.json поврежден!"
+            cd ..
+            pause
+            return
+        fi
+    else
+        echo "   ❌ Genesis.json не найден!"
+        cd ..
+        pause
+        return
+    fi
+    
+    # 3. Проверяем аккаунт в genesis
+    echo "3. Проверка аккаунта в genesis..."
+    account_balance=$(jq -r ".app_state.bank.balances[] | select(.address == \"$key_address\") | .coins[0].amount" ~/.wasmd/config/genesis.json 2>/dev/null)
+    if [ ! -z "$account_balance" ] && [ "$account_balance" != "null" ]; then
+        echo "   ✅ Аккаунт найден с балансом: $account_balance"
+        if (( account_balance >= input_amount_token )); then
+            echo "   ✅ Баланс достаточен для стейкинга"
+        else
+            echo "   ❌ Недостаточный баланс! Есть: $account_balance, нужно: $input_amount_token"
+            cd ..
+            pause
+            return
+        fi
+    else
+        echo "   ❌ Аккаунт $key_address не найден в genesis!"
+        echo "   💡 Сначала добавьте аккаунт через пункт 9"
+        cd ..
+        pause
+        return
+    fi
+    
+    # 4. Проверяем папку gentx
+    echo "4. Проверка папки gentx..."
+    gentx_dir=~/.wasmd/config/gentx
+    if [ ! -d "$gentx_dir" ]; then
+        echo "   ⚠️ Папка gentx не существует, создаем..."
+        mkdir -p "$gentx_dir"
+        if [ -d "$gentx_dir" ]; then
+            echo "   ✅ Папка gentx создана: $gentx_dir"
+        else
+            echo "   ❌ Не удалось создать папку gentx!"
+            cd ..
+            pause
+            return
+        fi
+    else
+        echo "   ✅ Папка gentx существует: $gentx_dir"
+    fi
+    
+    # Очищаем старые gentx файлы
+    echo "5. Очистка старых gentx файлов..."
+    old_gentx_count=$(find "$gentx_dir" -name "gentx-*.json" 2>/dev/null | wc -l)
+    if [ "$old_gentx_count" -gt 0 ]; then
+        echo "   🗑️ Найдено старых gentx файлов: $old_gentx_count"
+        read -p "   Удалить старые gentx файлы? (y/n): " clean_old
+        if [[ "$clean_old" =~ ^[yYдД]$ ]]; then
+            rm -f "$gentx_dir"/gentx-*.json 2>/dev/null
+            echo "   ✅ Старые gentx файлы удалены"
+        fi
+    else
+        echo "   ✅ Старых gentx файлов нет"
+    fi
+    
+    echo ""
+    echo "🚀 Выполнение команды wasmd genesis gentx..."
+
+    # Выполняем команду и сохраняем вывод
+    gentx_output=$(wasmd genesis gentx "$wallet_name" "$amount_with_prefix" \
         --chain-id "$chain_id" \
         --moniker "$moniker" \
         --commission-rate "0.10" \
@@ -1146,52 +1456,297 @@ function create_and_collect_gentx() {
         --min-self-delegation "$min_self_delegation" \
         --from "$wallet_name" \
         --keyring-backend "$KEYRING_BACKEND" \
-        --home "$HOME/.wasmd"
+        --home "$HOME/.wasmd" 2>&1)
     
-    # Проверка результата выполнения команды
-    if [ $? -ne 0 ]; then
-        echo "Ошибка при создании генезис-транзакции. Проверьте правильность параметров и доступный баланс."
-        cd ..
-        pause
-        return
-    fi
-
-    # Явная проверка наличия файла в директории ~/.wasmd/config/gentx
-    gentx_dir=~/.wasmd/config/gentx
-    if [[ ! -d "$gentx_dir" ]]; then
-        echo "Ошибка: Директория $gentx_dir не существует. Проверьте настройки вашей ноды."
-        cd ..
-        pause
-        return
-    fi
-
-    # Поиск файла генезис-транзакции
-    gentx_file=$(find "$gentx_dir" -type f -name "gentx-*.json" | head -n 1)
-    if [[ -f "$gentx_file" ]]; then
-        echo "✅ Генезис-транзакция создана успешно."
-        echo "Файл генезис-транзакции найден: $gentx_file"
-        
-        # Сбор gentx автоматически
-        echo "Сбор gentxs..."
-        wasmd genesis collect-gentxs && echo "✅ gentxs успешно собраны!" || { echo "❌ Ошибка при сборе gentxs!"; cd ..; pause; return; }
-        
-        # Проверяем что в genesis.json есть валидаторы
-        echo "Проверка genesis.json на наличие валидаторов..."
-        validators_count=$(jq '.app_state.genutil.gen_txs | length' ~/.wasmd/config/genesis.json)
-        if [ "$validators_count" -gt 0 ]; then
-            echo "✅ В genesis.json найдено $validators_count валидаторов"
+    gentx_exit_code=$?
+    
+    echo "📋 Вывод команды wasmd genesis gentx:"
+    echo "$gentx_output"
+    echo ""
+    
+    # Проверяем результат выполнения команды
+    if [ $gentx_exit_code -ne 0 ]; then
+        echo "❌ ОШИБКА: Команда wasmd genesis gentx завершилась с кодом $gentx_exit_code"
+        echo ""
+        echo "🔍 Анализ ошибок:"
+        if echo "$gentx_output" | grep -q "insufficient funds"; then
+            echo "   💰 Проблема: Недостаточно средств"
+            echo "   💡 Решение: Увеличьте баланс аккаунта в genesis (пункт 9)"
+        elif echo "$gentx_output" | grep -q "key not found"; then
+            echo "   🔑 Проблема: Ключ не найден"
+            echo "   💡 Решение: Проверьте имя ключа и keyring-backend"
+        elif echo "$gentx_output" | grep -q "account does not exist"; then
+            echo "   👤 Проблема: Аккаунт не существует в genesis"
+            echo "   💡 Решение: Добавьте аккаунт через пункт 9"
+        elif echo "$gentx_output" | grep -q "invalid chain-id"; then
+            echo "   🔗 Проблема: Неправильный chain-id"
+            echo "   💡 Решение: Проверьте chain-id в genesis.json"
         else
-            echo "❌ ВНИМАНИЕ: В genesis.json не найдено валидаторов! Это может вызвать ошибку при запуске."
+            echo "   ❓ Неизвестная ошибка"
         fi
         
-        echo
-        echo "ID вашей ноды:" 
-        wasmd tendermint show-node-id
-        echo
-        echo "🎉 Валидатор успешно создан в genesis.json! Теперь можно запускать ноду."
-    else
-        echo "❌ Ошибка: Файл генезис-транзакции не найден в директории $gentx_dir. Проверьте логи wasmd для подробностей."
+        cd ..
+        pause
+        return
     fi
+    
+    echo "✅ Команда wasmd genesis gentx выполнена успешно!"
+    
+    # Детальная проверка созданных файлов
+    echo ""
+    echo "🔍 Проверка созданных gentx файлов..."
+    
+    # Ждем немного чтобы файлы записались
+    sleep 2
+    
+    # Поиск файлов gentx
+    gentx_files=$(find "$gentx_dir" -name "gentx-*.json" 2>/dev/null)
+    gentx_count=$(echo "$gentx_files" | grep -c "gentx-" 2>/dev/null || echo "0")
+    
+    if [ "$gentx_count" -eq 0 ]; then
+        echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Файлы gentx НЕ СОЗДАНЫ!"
+        echo ""
+        echo "🔍 Диагностика:"
+        echo "   Папка gentx: $gentx_dir"
+        echo "   Содержимое папки:"
+        ls -la "$gentx_dir" 2>/dev/null || echo "   Папка недоступна"
+        echo ""
+        echo "🔧 Возможные причины:"
+        echo "   1. Нет прав на запись в папку ~/.wasmd/config/gentx"
+        echo "   2. Диск переполнен"
+        echo "   3. Проблемы с wasmd"
+        echo ""
+        echo "💡 Попробуйте:"
+        echo "   1. Проверить права: ls -la ~/.wasmd/config/"
+        echo "   2. Создать файл вручную: touch ~/.wasmd/config/gentx/test.txt"
+        echo "   3. Переинициализировать ноду (пункт 5)"
+        
+        cd ..
+        pause
+        return
+    fi
+    
+    echo "✅ Создано gentx файлов: $gentx_count"
+    
+    # Проверяем содержимое gentx файлов
+    echo ""
+    echo "🔍 Анализ содержимого gentx файлов..."
+    for gentx_file in $gentx_files; do
+        echo "📄 Файл: $(basename "$gentx_file")"
+        
+        if [ -f "$gentx_file" ]; then
+            file_size=$(stat -c%s "$gentx_file" 2>/dev/null || wc -c < "$gentx_file")
+            echo "   📏 Размер: $file_size байт"
+            
+            if [ "$file_size" -eq 0 ]; then
+                echo "   ❌ Файл пустой!"
+                continue
+            fi
+            
+            if jq '.' "$gentx_file" >/dev/null 2>&1; then
+                echo "   ✅ JSON валидный"
+                
+                # Проверяем ключевые поля
+                msg_type=$(jq -r '.body.messages[0]["@type"] // empty' "$gentx_file" 2>/dev/null)
+                validator_addr=$(jq -r '.body.messages[0].validator_address // .body.messages[0].value.validator_address // empty' "$gentx_file" 2>/dev/null)
+                delegator_addr=$(jq -r '.body.messages[0].delegator_address // .body.messages[0].value.delegator_address // empty' "$gentx_file" 2>/dev/null)
+                amount_in_gentx=$(jq -r '.body.messages[0].value.amount // .body.messages[0].amount // empty' "$gentx_file" 2>/dev/null)
+                
+                echo "   📋 Содержимое:"
+                echo "      Тип: $msg_type"
+                echo "      Валидатор: $validator_addr"
+                echo "      Делегатор: $delegator_addr"
+                echo "      Сумма: $amount_in_gentx"
+                
+                if [ ! -z "$msg_type" ] && [ ! -z "$validator_addr" ] && [ ! -z "$amount_in_gentx" ]; then
+                    echo "   ✅ Gentx файл содержит все необходимые данные"
+                else
+                    echo "   ❌ Gentx файл неполный!"
+                fi
+            else
+                echo "   ❌ JSON невалидный!"
+                echo "   📋 Первые 200 символов:"
+                head -c 200 "$gentx_file" 2>/dev/null
+            fi
+        else
+            echo "   ❌ Файл недоступен!"
+        fi
+        echo ""
+    done
+    
+    # Сбор gentx автоматически с детальной диагностикой
+    echo ""
+    echo "🔧 Сбор генезис-транзакций (collect-gentxs)..."
+    
+    # Проверяем что у нас есть gentx файлы для сбора
+    gentx_files_for_collect=$(find "$gentx_dir" -name "gentx-*.json" 2>/dev/null)
+    gentx_count_for_collect=$(echo "$gentx_files_for_collect" | grep -c "gentx-" 2>/dev/null || echo "0")
+    
+    if [ "$gentx_count_for_collect" -eq 0 ]; then
+        echo "❌ ОШИБКА: Нет gentx файлов для сбора!"
+        cd ..
+        pause
+        return
+    fi
+    
+    echo "📊 Найдено gentx файлов для сбора: $gentx_count_for_collect"
+    echo "📁 Файлы:"
+    for gentx_file in $gentx_files_for_collect; do
+        echo "   - $(basename "$gentx_file")"
+    done
+    echo ""
+    
+    # Сохраняем состояние genesis.json ДО collect-gentxs
+    echo "💾 Сохраняем текущее состояние genesis.json..."
+    genesis_backup="$HOME/.wasmd/config/genesis_before_collect.json"
+    cp ~/.wasmd/config/genesis.json "$genesis_backup" 2>/dev/null
+    
+    if command -v jq &> /dev/null; then
+        validators_before=$(jq '.app_state.genutil.gen_txs | length' ~/.wasmd/config/genesis.json 2>/dev/null || echo "0")
+        echo "📊 Валидаторов в genesis ДО collect-gentxs: $validators_before"
+    fi
+    
+    # Выполняем collect-gentxs с захватом вывода
+    echo "🚀 Выполнение команды: wasmd genesis collect-gentxs --home $HOME/.wasmd"
+    collect_output=$(wasmd genesis collect-gentxs --home "$HOME/.wasmd" 2>&1)
+    collect_exit_code=$?
+    
+    echo "📋 Вывод команды wasmd genesis collect-gentxs:"
+    echo "$collect_output"
+    echo ""
+    
+    if [ $collect_exit_code -ne 0 ]; then
+        echo "❌ ОШИБКА: Команда collect-gentxs завершилась с кодом $collect_exit_code"
+        echo ""
+        echo "🔍 Анализ ошибок collect-gentxs:"
+        if echo "$collect_output" | grep -q "failed to load application genesis state"; then
+            echo "   🏗️ Проблема: Ошибка загрузки состояния genesis"
+            echo "   💡 Решение: Проверьте структуру genesis.json"
+        elif echo "$collect_output" | grep -q "validator set is empty"; then
+            echo "   👥 Проблема: Набор валидаторов пустой"
+            echo "   💡 Решение: Проблема с gentx файлами"
+        elif echo "$collect_output" | grep -q "duplicate validator"; then
+            echo "   🔁 Проблема: Дублирующийся валидатор"
+            echo "   💡 Решение: Очистите старые gentx файлы"
+        elif echo "$collect_output" | grep -q "insufficient power"; then
+            echo "   ⚡ Проблема: Недостаточная сила валидатора"
+            echo "   💡 Решение: Увеличьте сумму стейкинга"
+        else
+            echo "   ❓ Неизвестная ошибка collect-gentxs"
+        fi
+        
+        echo ""
+        echo "🔄 Восстанавливаем genesis.json из резервной копии..."
+        if [ -f "$genesis_backup" ]; then
+            cp "$genesis_backup" ~/.wasmd/config/genesis.json
+            echo "✅ Genesis.json восстановлен"
+        fi
+        
+        cd ..
+        pause
+        return
+    fi
+    
+    echo "✅ Команда collect-gentxs выполнена успешно!"
+    
+    # Проверяем результат после collect-gentxs
+    echo ""
+    echo "🔍 Проверка результата collect-gentxs..."
+    
+    if command -v jq &> /dev/null; then
+        # Проверяем валидаторов ПОСЛЕ collect-gentxs
+        validators_after=$(jq '.app_state.genutil.gen_txs | length' ~/.wasmd/config/genesis.json 2>/dev/null || echo "0")
+        echo "📊 Валидаторов в genesis ПОСЛЕ collect-gentxs: $validators_after"
+        
+        if [ "$validators_after" -gt 0 ]; then
+            echo "✅ Валидаторы успешно добавлены в genesis.json!"
+            
+            # Показываем детали добавленных валидаторов
+            echo ""
+            echo "👥 Детали валидаторов в genesis.json:"
+            for i in $(seq 0 $((validators_after - 1))); do
+                echo "   Валидатор $((i + 1)):"
+                validator_info=$(jq -r ".app_state.genutil.gen_txs[$i]" ~/.wasmd/config/genesis.json 2>/dev/null)
+                
+                if [ "$validator_info" != "null" ]; then
+                    moniker=$(echo "$validator_info" | jq -r '.body.messages[0].description.moniker // .body.messages[0].value.description.moniker // "N/A"' 2>/dev/null)
+                    amount=$(echo "$validator_info" | jq -r '.body.messages[0].value.amount // .body.messages[0].amount // "N/A"' 2>/dev/null)
+                    delegator=$(echo "$validator_info" | jq -r '.body.messages[0].delegator_address // .body.messages[0].value.delegator_address // "N/A"' 2>/dev/null)
+                    validator=$(echo "$validator_info" | jq -r '.body.messages[0].validator_address // .body.messages[0].value.validator_address // "N/A"' 2>/dev/null)
+                    
+                    echo "      Moniker: $moniker"
+                    echo "      Сумма: $amount"
+                    echo "      Делегатор: $delegator"
+                    echo "      Валидатор: $validator"
+                else
+                    echo "      ❌ Не удалось получить информацию"
+                fi
+                echo ""
+            done
+            
+            # Проверяем, что суммы достаточны
+            echo "🔍 Проверка достаточности сумм стейкинга..."
+            MIN_VALIDATOR_STAKE=$(get_min_validator_stake)
+            
+            for i in $(seq 0 $((validators_after - 1))); do
+                amount=$(jq -r ".app_state.genutil.gen_txs[$i].body.messages[0].value.amount // .app_state.genutil.gen_txs[$i].body.messages[0].amount" ~/.wasmd/config/genesis.json 2>/dev/null)
+                amount_value=$(echo "$amount" | sed 's/[^0-9]*//g')
+                
+                if [ -n "$amount_value" ] && (( amount_value >= MIN_VALIDATOR_STAKE )); then
+                    echo "   ✅ Валидатор $((i + 1)): сумма $amount_value достаточна"
+                else
+                    echo "   ❌ Валидатор $((i + 1)): сумма $amount_value меньше минимума ($MIN_VALIDATOR_STAKE)"
+                fi
+            done
+            
+        else
+            echo "❌ КРИТИЧЕСКАЯ ОШИБКА: После collect-gentxs валидаторов по-прежнему НЕТ!"
+            echo ""
+            echo "🔍 Возможные причины:"
+            echo "   1. Gentx файлы содержат некорректные данные"
+            echo "   2. Суммы стейкинга недостаточны"
+            echo "   3. Проблемы с адресами валидаторов"
+            echo "   4. Ошибки в структуре genesis.json"
+            echo ""
+            echo "💡 Диагностика:"
+            
+            # Сравниваем genesis до и после
+            if [ -f "$genesis_backup" ]; then
+                echo "   📊 Сравнение genesis до и после collect-gentxs..."
+                validators_before_actual=$(jq '.app_state.genutil.gen_txs | length' "$genesis_backup" 2>/dev/null || echo "0")
+                echo "   ДО: $validators_before_actual валидаторов"
+                echo "   ПОСЛЕ: $validators_after валидаторов"
+                
+                if [ "$validators_before_actual" -eq "$validators_after" ]; then
+                    echo "   ⚠️ Количество валидаторов не изменилось!"
+                fi
+            fi
+            
+            cd ..
+            pause
+            return
+        fi
+    else
+        echo "⚠️ jq недоступен, детальная проверка невозможна"
+    fi
+    
+    # Очищаем резервную копию
+    rm -f "$genesis_backup" 2>/dev/null
+    
+    # Проверяем что в genesis.json есть валидаторы
+    echo "Проверка genesis.json на наличие валидаторов..."
+    validators_count=$(jq '.app_state.genutil.gen_txs | length' ~/.wasmd/config/genesis.json)
+    if [ "$validators_count" -gt 0 ]; then
+        echo "✅ В genesis.json найдено $validators_count валидаторов"
+    else
+        echo "❌ ВНИМАНИЕ: В genesis.json не найдено валидаторов! Это может вызвать ошибку при запуске."
+    fi
+    
+    echo
+    echo "ID вашей ноды:" 
+    wasmd tendermint show-node-id
+    echo
+    echo "🎉 Валидатор успешно создан в genesis.json! Теперь можно запускать ноду."
     
     cd ..
     pause
@@ -2494,11 +3049,12 @@ function update_min_stake_value() {
     echo "Выберите способ обновления:"
     echo "1. Ввести новое значение вручную"
     echo "2. Извлечь значение из текста ошибки"
-    echo "3. Автоматически определить из системы"
-    echo "4. Сбросить к значениям по умолчанию"
-    echo "5. Вернуться в меню"
+    echo "3. Использовать актуальное значение (824639634176)"
+    echo "4. Автоматически определить из системы"
+    echo "5. Сбросить к значениям по умолчанию"
+    echo "6. Вернуться в меню"
     echo ""
-    read -p "Ваш выбор (1-5): " update_choice
+    read -p "Ваш выбор (1-6): " update_choice
     
     case $update_choice in
         1)
@@ -2521,8 +3077,7 @@ function update_min_stake_value() {
             done
             
             if [ ! -z "$error_text" ]; then
-                extracted_value=$(echo "$error_text" | grep -o "DefaultPowerReduction ({[0-9]*})" | grep -o "[0-9]*")
-                if [ ! -z "$extracted_value" ]; then
+                if extracted_value=$(extract_min_from_error "$error_text"); then
                     echo "$extracted_value" > ~/.wasmd_min_stake
                     echo "✅ Извлечено и сохранено значение: $extracted_value"
                 else
@@ -2535,18 +3090,24 @@ function update_min_stake_value() {
             ;;
         3)
             echo ""
+            echo "🔄 Установка актуального значения: 824639634176"
+            echo "824639634176" > ~/.wasmd_min_stake
+            echo "✅ Актуальное значение установлено: 824639634176"
+            ;;
+        4)
+            echo ""
             echo "🔄 Автоматическое определение..."
             auto_value=$(get_min_validator_stake)
             echo "$auto_value" > ~/.wasmd_min_stake
             echo "✅ Автоматически определено и сохранено: $auto_value"
             ;;
-        4)
+        5)
             echo ""
             echo "🔄 Сброс к значениям по умолчанию..."
             rm -f ~/.wasmd_min_stake 2>/dev/null
             echo "✅ Настройки сброшены"
             ;;
-        5)
+        6)
             echo "Операция отменена"
             pause
             return
@@ -2569,6 +3130,187 @@ function update_min_stake_value() {
     
     echo ""
     pause
+}
+
+function quick_fix_validator_empty() {
+    echo "=========================================================="
+    echo "          БЫСТРОЕ ИСПРАВЛЕНИЕ 'validator set is empty'   "
+    echo "=========================================================="
+    echo ""
+    
+    echo "🔧 Эта функция автоматически исправит ошибку:"
+    echo "'validator set is empty after InitGenesis'"
+    echo ""
+    
+    # Предлагаем ввести текст ошибки для извлечения точного значения
+    echo "📋 Если у вас есть текст ошибки с точным значением DefaultPowerReduction:"
+    read -p "Хотите ввести текст ошибки? (y/n, Enter = n): " input_error
+    
+    if [[ "$input_error" =~ ^[yYдД]$ ]]; then
+        echo ""
+        echo "Вставьте полный текст ошибки (нажмите Enter два раза для завершения):"
+        error_text=""
+        while IFS= read -r line; do
+            [ -z "$line" ] && break
+            error_text+="$line "
+        done
+        
+        if [ ! -z "$error_text" ]; then
+            if extracted_min=$(extract_min_from_error "$error_text"); then
+                echo "✅ Извлечено минимальное значение: $extracted_min"
+                echo "$extracted_min" > ~/.wasmd_min_stake
+                echo "💾 Значение сохранено для будущего использования"
+            else
+                echo "⚠️ Не удалось извлечь значение из ошибки"
+            fi
+        fi
+        echo ""
+    fi
+    
+    # Определяем текущие значения
+    MIN_VALIDATOR_STAKE=$(get_min_validator_stake)
+    SAFE_AMOUNT=$(suggest_safe_amount "$MIN_VALIDATOR_STAKE")
+    
+    echo "📊 Текущие настройки:"
+    echo "   Минимальная сумма: $MIN_VALIDATOR_STAKE"
+    echo "   Безопасная сумма: $SAFE_AMOUNT"
+    echo ""
+    
+    # Проверяем genesis.json
+    GENESIS_FILE="$HOME/.wasmd/config/genesis.json"
+    if [ ! -f "$GENESIS_FILE" ]; then
+        echo "❌ ПРОБЛЕМА: genesis.json не найден!"
+        echo "💡 РЕШЕНИЕ: Выполните пункт 5 (Инициализировать узел)"
+        pause
+        return
+    fi
+    
+    # Проверяем валидаторов
+    if command -v jq &> /dev/null; then
+        validators_count=$(jq '.app_state.genutil.gen_txs | length' "$GENESIS_FILE" 2>/dev/null || echo "0")
+        accounts_count=$(jq '.app_state.bank.balances | length' "$GENESIS_FILE" 2>/dev/null || echo "0")
+        
+        echo "🔍 Диагностика genesis.json:"
+        echo "   Валидаторов: $validators_count"
+        echo "   Аккаунтов: $accounts_count"
+        echo ""
+        
+        if [ "$validators_count" -eq 0 ]; then
+            echo "❌ ПРОБЛЕМА: Нет валидаторов в genesis.json"
+            echo ""
+            echo "🔧 АВТОМАТИЧЕСКОЕ ИСПРАВЛЕНИЕ:"
+            echo "Выберите действие:"
+            echo "1. Создать валидатора автоматически (если есть ключи и аккаунты)"
+            echo "2. Пошаговое исправление (создать ключ → аккаунт → валидатора)"
+            echo "3. Вернуться в меню"
+            echo ""
+            read -p "Ваш выбор (1-3): " fix_choice
+            
+            case $fix_choice in
+                1)
+                    echo ""
+                    echo "🚀 Автоматическое создание валидатора..."
+                    
+                    # Проверяем ключи
+                    KEYRING_BACKEND=$(detect_keyring_backend)
+                    keys_list=$(timeout 10s wasmd keys list --keyring-backend "$KEYRING_BACKEND" 2>/dev/null | head -5)
+                    
+                    if [ -z "$keys_list" ]; then
+                        echo "❌ Нет ключей валидатора. Создайте ключ через пункт 7"
+                        pause
+                        return
+                    fi
+                    
+                    # Берем первый доступный ключ
+                    first_key=$(echo "$keys_list" | head -1 | awk '{print $1}' | sed 's/[^a-zA-Z0-9_-]//g')
+                    if [ -z "$first_key" ]; then
+                        echo "❌ Не удалось определить имя ключа"
+                        pause
+                        return
+                    fi
+                    
+                    echo "🔑 Используем ключ: $first_key"
+                    
+                    # Проверяем есть ли аккаунт в genesis
+                    key_address=$(timeout 10s wasmd keys show "$first_key" -a --keyring-backend "$KEYRING_BACKEND" 2>/dev/null)
+                    if [ -z "$key_address" ]; then
+                        echo "❌ Не удалось получить адрес ключа"
+                        pause
+                        return
+                    fi
+                    
+                    echo "📍 Адрес ключа: $key_address"
+                    
+                    # Проверяем баланс в genesis
+                    balance=$(jq -r ".app_state.bank.balances[] | select(.address == \"$key_address\") | .coins[0].amount" "$GENESIS_FILE" 2>/dev/null)
+                    
+                    if [ -z "$balance" ] || [ "$balance" = "null" ]; then
+                        echo "❌ Аккаунт $key_address не найден в genesis.json"
+                        echo "💡 Добавляем аккаунт с безопасной суммой: $SAFE_AMOUNT"
+                        
+                        # Добавляем аккаунт
+                        cd wasmd 2>/dev/null || cd .
+                        STAKE_CLEAN=$(sanitize_input "$STAKE")
+                        AMOUNT_WITH_DENOM="${SAFE_AMOUNT}${STAKE_CLEAN}"
+                        
+                        if wasmd genesis add-genesis-account "$key_address" "$AMOUNT_WITH_DENOM"; then
+                            echo "✅ Аккаунт добавлен в genesis"
+                            balance="$SAFE_AMOUNT"
+                        else
+                            echo "❌ Ошибка при добавлении аккаунта"
+                            cd .. 2>/dev/null
+                            pause
+                            return
+                        fi
+                        cd .. 2>/dev/null
+                    else
+                        echo "✅ Аккаунт найден в genesis с балансом: $balance"
+                    fi
+                    
+                    # Проверяем достаточность баланса
+                    if (( balance < MIN_VALIDATOR_STAKE )); then
+                        echo "❌ Баланс ($balance) меньше минимума ($MIN_VALIDATOR_STAKE)"
+                        echo "💡 Рекомендуется увеличить баланс через пункт 9"
+                        pause
+                        return
+                    fi
+                    
+                    # Создаем валидатора
+                    echo "🔨 Создание валидатора..."
+                    echo "💡 Теперь выполните пункт 10 с ключом '$first_key'"
+                    echo "   Используйте безопасную сумму: $SAFE_AMOUNT"
+                    echo ""
+                    pause
+                    ;;
+                2)
+                    echo ""
+                    echo "📋 Пошаговое исправление:"
+                    echo "1. Выполните пункт 7 (Создать ключ валидатора)"
+                    echo "2. Выполните пункт 9 (Добавить аккаунт с суммой >= $MIN_VALIDATOR_STAKE)"
+                    echo "3. Выполните пункт 10 (Создать валидатора в генезисе)"
+                    echo "4. Выполните пункт 12 (Запустить ноду)"
+                    echo ""
+                    pause
+                    ;;
+                3)
+                    return
+                    ;;
+                *)
+                    echo "❌ Неверный выбор"
+                    pause
+                    ;;
+            esac
+        else
+            echo "✅ Валидаторы найдены в genesis.json"
+            echo "💡 Проблема может быть в недостаточной сумме стейкинга"
+            echo "   Проверьте детали через пункт 19.5 (Диагностика genesis.json)"
+            pause
+        fi
+    else
+        echo "❌ jq не установлен. Невозможно провести диагностику"
+        echo "💡 Установите jq: sudo apt install jq"
+        pause
+    fi
 }
 
 # Основной цикл меню
@@ -2603,6 +3345,7 @@ while true; do
     echo "🛠️ УТИЛИТЫ:"
     echo "19. Диагностика ноды (поиск проблем)"
     echo "19.5. Диагностика genesis.json (validator set is empty)"
+    echo "19.6. БЫСТРОЕ ИСПРАВЛЕНИЕ 'validator set is empty'"
     echo "19.7. Обновить минимальную сумму для валидатора"
     echo "20. Просмотреть логи"
     echo "21. Резервное копирование файлов"
@@ -2638,6 +3381,7 @@ while true; do
         18) send_tokens ;;
         19) diagnose_node ;;
         19.5) diagnose_genesis_problems ;;
+        19.6) quick_fix_validator_empty ;;
         19.7) update_min_stake_value ;;
         20) view_logs ;;
         21) backup_files ;;
